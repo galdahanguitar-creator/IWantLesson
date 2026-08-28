@@ -1725,6 +1725,10 @@ function TeacherStudentsTab({ ctx }) {
 // carries it, and the student's device remembers it from then on.
 function ApprovedCodeModal({ info, onClose }) {
   const [copied, setCopied] = useState('');
+  // Opened from disk rather than from the web, location.origin is "null" and
+  // the pathname is a local folder — any link built from it is meaningless to
+  // everyone but this computer. Better to say so than to hand out a dead link.
+  const isLocal = location.protocol === 'file:';
   const link = `${location.origin}${location.pathname}#s/${info.code}`;
   const msg  = `היי! נרשמת לשיעורי גיטרה 🎸\nזה הקישור האישי שלך למערכת — שמור אותו:\n${link}`;
 
@@ -1747,19 +1751,35 @@ function ApprovedCodeModal({ info, onClose }) {
           <div style={{ fontSize:32, fontWeight:700, letterSpacing:6, color:'var(--color-text-primary)', direction:'ltr' }}>{info.code}</div>
         </div>
 
-        <div style={{ background:'var(--color-background-info)', borderRadius:10, padding:'10px 12px', marginBottom:14, textAlign:'right' }}>
-          <div style={{ fontSize:12, color:'var(--color-text-info)', fontWeight:600, marginBottom:4 }}>שלח את זה בוואטסאפ</div>
-          <div style={{ fontSize:11, color:'var(--color-text-info)', lineHeight:1.5 }}>
-            לחיצה אחת על הקישור והמכשיר של התלמיד יזכור אותו — הוא לא יצטרך להקליד כלום שוב.
+        {isLocal ? (
+          <div style={{ background:'var(--color-background-danger)', borderRadius:10, padding:'12px 14px',
+                        marginBottom:14, textAlign:'right' }}>
+            <div style={{ fontSize:13, color:'var(--color-text-danger)', fontWeight:700, marginBottom:6 }}>
+              ⚠️ האפליקציה פתוחה מקובץ במחשב שלך
+            </div>
+            <div style={{ fontSize:12, color:'var(--color-text-danger)', lineHeight:1.6 }}>
+              קישור שנוצר כאן מצביע על תיקייה במחשב הזה, ולא יעבוד אצל אף אחד אחר.
+              סגור את החלון הזה, פתח את האפליקציה <strong>מהכתובת שלה באינטרנט</strong>,
+              והיכנס משם — הקוד למעלה כבר נשמר והוא תקף.
+            </div>
           </div>
-        </div>
+        ) : (
+          <>
+            <div style={{ background:'var(--color-background-info)', borderRadius:10, padding:'10px 12px', marginBottom:14, textAlign:'right' }}>
+              <div style={{ fontSize:12, color:'var(--color-text-info)', fontWeight:600, marginBottom:4 }}>שלח את זה בוואטסאפ</div>
+              <div style={{ fontSize:11, color:'var(--color-text-info)', lineHeight:1.5 }}>
+                לחיצה אחת על הקישור והמכשיר של התלמיד יזכור אותו — הוא לא יצטרך להקליד כלום שוב.
+              </div>
+            </div>
 
-        <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => copy(msg, 'msg')}>
-          {copied === 'msg' ? '✓ ההודעה הועתקה' : '📋 העתק הודעה מוכנה'}
-        </button>
-        <button style={{ ...S.btn('info'), width:'100%', marginBottom:8 }} onClick={() => copy(link, 'link')}>
-          {copied === 'link' ? '✓ הקישור הועתק' : '🔗 העתק קישור בלבד'}
-        </button>
+            <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => copy(msg, 'msg')}>
+              {copied === 'msg' ? '✓ ההודעה הועתקה' : '📋 העתק הודעה מוכנה'}
+            </button>
+            <button style={{ ...S.btn('info'), width:'100%', marginBottom:8 }} onClick={() => copy(link, 'link')}>
+              {copied === 'link' ? '✓ הקישור הועתק' : '🔗 העתק קישור בלבד'}
+            </button>
+          </>
+        )}
         {copied === 'fail' && (
           <div style={{ fontSize:11, color:'var(--color-text-danger)', marginBottom:8, direction:'ltr', wordBreak:'break-all' }}>{link}</div>
         )}
@@ -2409,8 +2429,13 @@ function MusicScheduler() {
   const [me,        setMe]        = useState(null);
   const [meError,   setMeError]   = useState('');
   const [approvedInfo, setApprovedInfo] = useState(null);
+  const [roleNotice,   setRoleNotice]   = useState(false);
 
   const backfilledRef = useRef(false);
+  // Signing out tears down the teacher's listeners, but they stay live for a
+  // moment with no teacher credential — so Firestore rightly refuses them.
+  // That refusal is expected, not a failure, and must not raise an error screen.
+  const leavingRef = useRef(false);
   const route     = parseRoute();
   const isTeacher = !!teacherUid;
   const isStudent = !isTeacher && !!me;
@@ -2496,7 +2521,10 @@ function MusicScheduler() {
 
       setHolidays(data.holidays);
       setTeacher({ uid: teacherUid, ...data });
-    }, e => { console.error(e); setFatal('טעינת נתוני המורה נכשלה.'); }));
+    }, e => {
+      if (leavingRef.current || e?.code === 'permission-denied') { console.warn('teacher doc closed', e?.code); return; }
+      console.error(e); setFatal('טעינת נתוני המורה נכשלה. בדוק את החיבור לאינטרנט.');
+    }));
 
     subs.push(db.collection('students').where('teacherId', '==', teacherUid)
       .onSnapshot(s => setStudents(s.docs.map(d => ({ ...d.data(), id: d.id })))));
@@ -2508,6 +2536,7 @@ function MusicScheduler() {
       .onSnapshot(
         s => { setRealLessons(s.docs.map(d => ({ ...d.data(), id: d.id }))); setLessonsLoaded(true); },
         e => {
+          if (leavingRef.current) return;
           console.error(e);
           // Firestore puts a one-click "create this index" URL in the error
           // text. Surfacing it beats telling a non-developer to open DevTools.
@@ -2678,7 +2707,28 @@ function MusicScheduler() {
     } catch (e) { console.error(e); return 'הבדיקה נכשלה — בדוק את החיבור'; }
   }
 
+  // Opening a student link on the teacher's own device lands in the teacher
+  // interface, because the teacher session wins. That looks like the link is
+  // broken, so offer the choice explicitly rather than silently ignoring it.
+  useEffect(() => {
+    if (isTeacher && route.kind === 'student') setRoleNotice(true);
+  }, [isTeacher, route.kind]);
+
+  async function viewAsStudent(code) {
+    leavingRef.current = true;
+    setRoleNotice(false); setFatal(''); setFatalLink('');
+    writeStoredCode(code);
+    setTeacher(null); setStudents([]); setPendingStudents([]);
+    setRealLessons([]); setLessonsLoaded(false); setBoards({}); setClaims({});
+    sweptRef.current = false; backfilledRef.current = false; stuKeyRef.current = false;
+    try { await auth.signOut(); } catch (e) { console.error(e); }
+    setStudentCode(code);
+    setTimeout(() => { leavingRef.current = false; }, 4000);
+  }
+
   async function logout() {
+    leavingRef.current = true;
+    setFatal(''); setFatalLink('');
     writeStoredCode('');
     setStudentCode(''); setMe(null); setMeError('');
     setTeacher(null); setStudents([]); setPendingStudents([]);
@@ -2686,9 +2736,10 @@ function MusicScheduler() {
     // Must reset with realLessons — a stale `true` here would let the next
     // session's sweep run against an empty lesson list and overwrite records.
     setLessonsLoaded(false);
-    sweptRef.current = false;
+    sweptRef.current = false; backfilledRef.current = false; stuKeyRef.current = false;
     if (location.hash) location.hash = '';
     try { await auth.signOut(); } catch (e) { console.error(e); }
+    setTimeout(() => { leavingRef.current = false; }, 4000);
   }
 
   // ── lesson mutations ──────────────────────────────────────────────────────
@@ -3024,6 +3075,11 @@ function MusicScheduler() {
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:14, padding:24, background:'var(--color-background-tertiary)' }}>
       <div style={{ fontSize:44 }}>⚠️</div>
       <div style={{ fontSize:15, color:'var(--color-text-danger)', textAlign:'center', maxWidth:340, lineHeight:1.7, direction:'rtl' }}>{fatal}</div>
+      {!fatalLink && (
+        <button style={{ ...S.btn('primary'), marginTop:4 }} onClick={() => location.reload()}>
+          רענן ונסה שוב
+        </button>
+      )}
       {fatalLink && (
         <>
           <a href={fatalLink} target="_blank" rel="noopener noreferrer"
@@ -3064,7 +3120,34 @@ function MusicScheduler() {
 
   if (isTeacher) {
     if (!teacher) return <LoadingView />;
-    return <TeacherView ctx={ctx} />;
+    return (
+      <>
+        <TeacherView ctx={ctx} />
+        {roleNotice && (
+          <Modal onClose={() => { setRoleNotice(false); location.hash = ''; }}>
+            <div style={{ direction:'rtl', textAlign:'center', padding:'4px 0' }}>
+              <div style={{ fontSize:34, marginBottom:10 }}>👋</div>
+              <div style={{ fontSize:16, fontWeight:600, marginBottom:8 }}>זה קישור של תלמיד</div>
+              <p style={{ fontSize:13.5, color:'var(--color-text-secondary)', margin:'0 0 18px', lineHeight:1.6 }}>
+                אתה מחובר כמורה בדפדפן הזה, ולכן נפתח ממשק המורה.
+                אצל התלמיד הקישור ייפתח נכון.
+              </p>
+              <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }}
+                onClick={() => viewAsStudent(route.code)}>
+                👁 בדוק איך זה נראה לתלמיד
+              </button>
+              <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:12 }}>
+                תתנתק מחשבון המורה. כניסה חוזרת עם האימייל והסיסמה.
+              </div>
+              <button style={{ ...S.btn('ghost'), width:'100%' }}
+                onClick={() => { setRoleNotice(false); location.hash = ''; }}>
+                המשך כמורה
+              </button>
+            </div>
+          </Modal>
+        )}
+      </>
+    );
   }
   if (isStudent) return <StudentView ctx={ctx} />;
   if (studentCode && !meError) return <LoadingView />;
