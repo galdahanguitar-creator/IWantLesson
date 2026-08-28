@@ -3125,6 +3125,11 @@ function MusicScheduler() {
       claimsRef(teacher?.boardKey, ws).set({ slots }, { merge:true }).catch(() => {})));
   }
 
+  // Studio name, teacher name, and her own holiday list.
+  function updateTeacher(patch) {
+    return teacherRef().set(patch, { merge:true }).catch(e => console.error('updateTeacher', e));
+  }
+
   async function setShareContact(sid, on) {
     try {
       await studentRef(sid).update({ shareContact: !!on });
