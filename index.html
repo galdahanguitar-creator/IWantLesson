@@ -1278,6 +1278,7 @@ function AddStudentModal({ onClose, onSave }) {
   const [type,   setType]   = useState('fixed');
   const [di,     setDi]     = useState(0);
   const [t,      setT]      = useState('14:00');
+  const [share,  setShare]  = useState(true);
 
   const ok = name.trim().length > 1 && (type === 'flexible' || isValidTime(t));
 
@@ -1320,9 +1321,24 @@ function AddStudentModal({ onClose, onSave }) {
         </div>
       )}
 
+      <label style={{ display:'flex', alignItems:'flex-start', gap:10, cursor:'pointer', marginBottom:14,
+                      padding:'10px 12px', borderRadius:'var(--border-radius-md)',
+                      border:`1px solid ${share?'var(--color-border-secondary)':'var(--color-border-tertiary)'}`,
+                      background: share?'var(--color-background-secondary)':'transparent' }}>
+        <input type="checkbox" checked={share} onChange={e => setShare(e.target.checked)}
+               style={{ width:16, height:16, margin:'3px 0 0' }} />
+        <div>
+          <div style={{ fontSize:13, fontWeight:500 }}>מותר לתלמידים אחרים ליצור קשר</div>
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginTop:2, lineHeight:1.5 }}>
+            הטלפון יופיע בלוח הכיתה לתיאום החלפות. כבה אם ההורה ביקש שלא.
+          </div>
+        </div>
+      </label>
+
       <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8, opacity: ok ? 1 : 0.45 }}
         disabled={!ok}
-        onClick={() => onSave({ name, phone, parent, type, di: type==='fixed'?di:null, t: type==='fixed'?t:null })}>
+        onClick={() => onSave({ name, phone, parent, type, share,
+                                di: type==='fixed'?di:null, t: type==='fixed'?t:null })}>
         ✅ הוסף וצור קוד אישי
       </button>
       <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={onClose}>ביטול</button>
@@ -1421,6 +1437,23 @@ function TeacherStudentsTab({ ctx }) {
           </div>
         </div>
         <OneTimeLessonAdder sid={selected} addLesson={addLesson} lessons={lessons} students={students} THIS_WK={THIS_WK} NEXT_WK={NEXT_WK} pubNext={pubNext} baseSlots={baseSlots} />
+
+        {/* ── Contact sharing ── */}
+        <div style={{ ...S.card, marginTop:10 }}>
+          <label style={{ display:'flex', alignItems:'flex-start', gap:10, cursor:'pointer' }}>
+            <input type="checkbox" checked={stu.shareContact !== false}
+                   onChange={e => ctx.setShareContact(stu.id, e.target.checked)}
+                   style={{ width:16, height:16, margin:'3px 0 0' }} />
+            <div>
+              <div style={{ fontSize:13, fontWeight:500 }}>מותר לתלמידים אחרים ליצור קשר</div>
+              <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginTop:2, lineHeight:1.5 }}>
+                {stu.shareContact !== false
+                  ? 'הטלפון מופיע בלוח הכיתה לתיאום החלפות'
+                  : 'הטלפון מוסתר. השם עדיין מופיע בלוח'}
+              </div>
+            </div>
+          </label>
+        </div>
 
         {/* ── Type management ── */}
         <div style={{ ...S.card, marginTop:10 }}>
@@ -1910,7 +1943,8 @@ function boardSlotsFor(weekStart, board, claims) {
       const state = s.state === 'blocked' ? 'blocked' : (claim || s.state === 'taken' ? 'taken' : 'free');
       return {
         di: s.di, t: s.t, date: dateOfDi(weekStart, s.di), state,
-        name: claim ? claim.name : (s.name || null),
+        name:  claim ? claim.name  : (s.name  || null),
+        phone: claim ? (claim.phone || '') : (s.phone || ''),
       };
     });
 }
@@ -2192,6 +2226,7 @@ function StudentBoardTab({ ctx }) {
   const { me, lessons, THIS_WK, NEXT_WK, boards, claims, pubNext } = ctx;
   const [weekView, setWeekView] = useState('this');
 
+  const [contact, setContact] = useState(null);
   const activeWk = weekView==='this' ? THIS_WK : NEXT_WK;
   const board    = boards[activeWk] || null;
   const cl       = claims[activeWk] || {};
@@ -2211,7 +2246,8 @@ function StudentBoardTab({ ctx }) {
 
   const calItems = useMemo(() => slots.map(s => ({
     id: `${s.date}_${s.t}`, date: s.date, time: s.t, di: s.di,
-    state: s.state, name: s.name, mine: mineKeys.has(`${s.date}_${s.t}`),
+    state: s.state, name: s.name, phone: s.phone,
+    mine: mineKeys.has(`${s.date}_${s.t}`),
   })), [slots, mineKeys]);
 
   function renderItem(item, top, height) {
@@ -2220,13 +2256,19 @@ function StudentBoardTab({ ctx }) {
     else if (item.state === 'free')  { bg='#f0fdf4'; border='#86efac'; fg='#166534'; label='פנוי'; }
     else if (item.mine)              { bg='#fef9c3'; border='#fde68a'; fg='#78350f'; label='⭐ השיעור שלי'; }
     else                             { bg='#dbeafe'; border='#93c5fd'; fg='#1e40af'; label=item.name || 'תפוס'; }
+    const tappable = item.state === 'taken' && !item.mine && !!item.phone;
     return (
-      <div key={item.id} style={{
-        position:'absolute', top, left:2, right:2, height,
-        background:bg, border:`1.5px ${item.state==='free'?'dashed':'solid'} ${border}`,
-        borderRadius:5, padding:'3px 5px', overflow:'hidden',
-      }}>
-        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
+      <div key={item.id}
+        onClick={tappable ? (e => { e.stopPropagation(); setContact(item); }) : undefined}
+        style={{
+          position:'absolute', top, left:2, right:2, height,
+          background:bg, border:`1.5px ${item.state==='free'?'dashed':'solid'} ${border}`,
+          borderRadius:5, padding:'3px 5px', overflow:'hidden',
+          cursor: tappable ? 'pointer' : 'default',
+        }}>
+        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>
+          {label}{tappable ? ' 💬' : ''}
+        </div>
         <div style={{ fontSize:10, color:fg }}>{item.time}</div>
       </div>
     );
@@ -2262,7 +2304,34 @@ function StudentBoardTab({ ctx }) {
           הלוח לשבוע זה טרם פורסם
         </div>
       ) : (
-        <WeekCalendar days={teachingDays} items={calItems} renderItem={renderItem} />
+        <>
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, textAlign:'center' }}>
+            שעה עם 💬 — אפשר ללחוץ וליצור קשר לתיאום החלפה
+          </div>
+          <WeekCalendar days={teachingDays} items={calItems} renderItem={renderItem} />
+        </>
+      )}
+
+      {contact && (
+        <Modal onClose={() => setContact(null)}>
+          <div style={{ textAlign:'center', direction:'rtl', padding:'4px 0' }}>
+            <div style={{ fontSize:17, fontWeight:600, marginBottom:4 }}>{contact.name}</div>
+            <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:18 }}>
+              יום {DAY_HE[contact.di]} · {dd(contact.date)} · {contact.time}
+            </div>
+            <a href={`https://wa.me/972${contact.phone.replace(/\D/g,'').replace(/^0/,'')}`}
+               target="_blank" rel="noopener noreferrer"
+               style={{ ...S.btn('success'), width:'100%', display:'block', textDecoration:'none',
+                        padding:'12px', marginBottom:8, boxSizing:'border-box' }}>
+              💬 שלח וואטסאפ לתיאום החלפה
+            </a>
+            <div style={{ fontSize:11.5, color:'var(--color-text-secondary)', marginBottom:14, lineHeight:1.6 }}>
+              סיכמתם ביניכם? כל אחד מכם צריך לשנות את השעה שלו במערכת בעצמו,
+              או לבקש מהמורה.
+            </div>
+            <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setContact(null)}>סגור</button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -2273,8 +2342,9 @@ function StudentBoardTab({ ctx }) {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 //  teachers/{tid}                      private: name, studio, slots, holidays
-//  teachers/{tid}/board/{weekStart}    published week — what students may see
-//  teachers/{tid}/claims/{weekStart}   live slot claims made after publishing
+//  boards/{boardKey}_{weekStart}       published week — what students may see,
+//                                      at an address only a student can know
+//  claims/{boardKey}_{weekStart}       live slot claims made after publishing
 //  students/{code}                     `code` is the doc id and the secret
 //  students/{code}/lessons/{lessonId}  written only when something happened
 //  pending_students/{autoId}           registration inbox, per teacher
@@ -2343,8 +2413,8 @@ function MusicScheduler() {
   const teacherRef = () => db.collection('teachers').doc(teacherUid);
   const studentRef = (sid) => db.collection('students').doc(sid);
   const lessonRef  = (sid, id) => studentRef(sid).collection('lessons').doc(id);
-  const boardRef   = (tid, ws) => db.collection('teachers').doc(tid).collection('board').doc(ws);
-  const claimsRef  = (tid, ws) => db.collection('teachers').doc(tid).collection('claims').doc(ws);
+  const boardRef   = (key, ws) => db.collection('boards').doc(`${key}_${ws}`);
+  const claimsRef  = (key, ws) => db.collection('claims').doc(`${key}_${ws}`);
 
   // ── boot: firebase + anonymous session ────────────────────────────────────
   useEffect(() => {
@@ -2382,6 +2452,10 @@ function MusicScheduler() {
           name: email.split('@')[0] || 'מורה',
           studioName: 'אולפן מוסיקה',
           slots: [], holidays: DEFAULT_HOLIDAYS,
+          // The board lives at an unguessable address rather than one derived
+          // from the teacher id, because the teacher id travels in the public
+          // registration link. Only someone handed a student code can find it.
+          boardKey: genCode(12),
           lastSweep: null, createdAt: new Date().toISOString(),
         });
         return;
@@ -2392,10 +2466,20 @@ function MusicScheduler() {
       // let the sweep project today's schedule onto past weeks. Stamp it once,
       // from the studio's own start date.
       const slots = data.slots || [];
-      if (slots.some(s => !s.since) && !backfilledRef.current) {
+      const needsKey   = !data.boardKey;
+      const needsSince = slots.some(s => !s.since);
+      if ((needsKey || needsSince) && !backfilledRef.current) {
         backfilledRef.current = true;
-        const start = (data.createdAt || '').slice(0, 10) || TODAY;
-        await tRef.set({ slots: slots.map(s => s.since ? s : { ...s, since: start }) }, { merge:true });
+        const patch = {};
+        // A teacher document created before boards moved has no key. Without
+        // this the board would be written to "undefined_<week>" — a guessable
+        // address shared by every such teacher.
+        if (needsKey) patch.boardKey = genCode(12);
+        if (needsSince) {
+          const start = (data.createdAt || '').slice(0, 10) || TODAY;
+          patch.slots = slots.map(s => s.since ? s : { ...s, since: start });
+        }
+        await tRef.set(patch, { merge:true });
         return;
       }
 
@@ -2426,16 +2510,6 @@ function MusicScheduler() {
         }
       ));
 
-    subs.push(tRef.collection('board').onSnapshot(s => {
-      const m = {}; s.docs.forEach(d => { m[d.id] = { ...d.data(), weekStart: d.id }; });
-      setBoards(m);
-    }));
-
-    subs.push(tRef.collection('claims').onSnapshot(s => {
-      const m = {}; s.docs.forEach(d => { m[d.id] = d.data() || {}; });
-      setClaims(m);
-    }));
-
     return () => subs.forEach(u => u());
   }, [db, teacherUid, auth]);
 
@@ -2462,20 +2536,21 @@ function MusicScheduler() {
         subs.push(db.collection('students').doc(studentCode).collection('lessons')
           .onSnapshot(s => setRealLessons(s.docs.map(d => ({ ...d.data(), id: d.id })))));
 
-        subs.push(db.collection('teachers').doc(tid).collection('board').onSnapshot(s => {
-          const m = {};
-          s.docs.forEach(d => {
+        // Only this student's own teacher, and only the two weeks that matter.
+        // Nothing here can reach another teacher's board, so the boards can
+        // never mix.
+        const key = stu.boardKey;
+        [THIS_WK, NEXT_WK].forEach(ws => {
+          subs.push(db.collection('boards').doc(`${key}_${ws}`).onSnapshot(d => {
+            if (!d.exists) return;
             const data = d.data();
-            m[d.id] = { ...data, weekStart: d.id };
             if (data.holidays) setHolidays(data.holidays);
-          });
-          setBoards(m);
-        }));
-
-        subs.push(db.collection('teachers').doc(tid).collection('claims').onSnapshot(s => {
-          const m = {}; s.docs.forEach(d => { m[d.id] = d.data() || {}; });
-          setClaims(m);
-        }));
+            setBoards(m => ({ ...m, [ws]: data }));
+          }, () => {}));
+          subs.push(db.collection('claims').doc(`${key}_${ws}`).onSnapshot(d => {
+            setClaims(m => ({ ...m, [ws]: d.exists ? (d.data().slots || {}) : {} }));
+          }, () => {}));
+        });
       } catch (e) {
         console.error(e);
         if (!cancelled) setMeError('לא הצלחנו לטעון את הנתונים. בדוק את החיבור לאינטרנט.');
@@ -2483,7 +2558,10 @@ function MusicScheduler() {
     })();
 
     return () => { cancelled = true; subs.forEach(u => u()); };
-  }, [db, ready, teacherUid, studentCode]);
+    // THIS_WK is a dependency: without it, a tab left open across Saturday
+    // night keeps listening to last week's documents and the student sees an
+    // empty, "unpublished" board until they reload.
+  }, [db, ready, teacherUid, studentCode, THIS_WK]);
 
   // ── students enriched with their slot, read off the authoritative schedule ──
   const enrichedStudents = useMemo(() => {
@@ -2494,6 +2572,23 @@ function MusicScheduler() {
                type: slot ? 'fixed' : (s.type === 'fixed' ? 'flexible' : s.type) };
     });
   }, [students, teacher]);
+
+  // Students created before the board moved carry no key, so their app would
+  // look for the board at the wrong address. The teacher repairs them.
+  const stuKeyRef = useRef(false);
+  useEffect(() => {
+    if (!db || !isTeacher || !teacher?.boardKey || stuKeyRef.current) return;
+    const stale = students.filter(s => s.boardKey !== teacher.boardKey);
+    if (!stale.length) return;
+    stuKeyRef.current = true;
+    (async () => {
+      for (let i = 0; i < stale.length; i += 400) {
+        const b = db.batch();
+        stale.slice(i, i + 400).forEach(s => b.update(studentRef(s.id), { boardKey: teacher.boardKey }));
+        await b.commit().catch(e => console.error('boardKey backfill', e));
+      }
+    })();
+  }, [db, isTeacher, teacher, students]);
 
   // ── the flat lesson array the whole UI expects ────────────────────────────
   const lessons = useMemo(() => {
@@ -2591,14 +2686,19 @@ function MusicScheduler() {
   // and nothing else — never the code that identifies the student.
   const HOLDS = ['scheduled', 'pending_cancel'];
 
-  function setClaim(tid, date, time, name) {
-    return claimsRef(tid, wkStart(date))
-      .set({ [claimKey(parseD(date).getDay(), time)]: { name: name || '' } }, { merge: true })
-      .catch(e => console.error('setClaim', e));
+  const boardKey = isTeacher ? teacher?.boardKey : me?.boardKey;
+
+  function setClaim(date, time, stu) {
+    const share = stu?.shareContact !== false;
+    return claimsRef(boardKey, wkStart(date)).set({
+      slots: { [claimKey(parseD(date).getDay(), time)]: {
+        name: stu?.name || '', phone: share ? (stu?.phone || '') : '',
+      } },
+    }, { merge: true }).catch(e => console.error('setClaim', e));
   }
-  function releaseClaim(tid, date, time) {
-    return claimsRef(tid, wkStart(date))
-      .update({ [claimKey(parseD(date).getDay(), time)]: firebase.firestore.FieldValue.delete() })
+  function releaseClaim(date, time) {
+    return claimsRef(boardKey, wkStart(date))
+      .update({ [`slots.${claimKey(parseD(date).getDay(), time)}`]: firebase.firestore.FieldValue.delete() })
       .catch(e => {       // the week may simply have no claims document yet
         if (e?.code !== 'not-found') console.error('releaseClaim', e);
       });
@@ -2617,7 +2717,7 @@ function MusicScheduler() {
       // slot stays "taken" on every student's board forever.
       const next = patch.status || l.status;
       if (HOLDS.includes(l.status) && !HOLDS.includes(next)) {
-        await releaseClaim(tid, l.date, l.time);
+        await releaseClaim(l.date, l.time);
       }
     } catch (e) { console.error('updLesson', e); }
   }
@@ -2642,7 +2742,7 @@ function MusicScheduler() {
         id, teacherId: tid, sid, date, time,
         status: 'scheduled', reason: '', cancelledAt: null,
       }, { merge: true });
-      await setClaim(tid, date, time, stu?.name);
+      await setClaim(date, time, stu);
     } catch (e) {
       console.error('addLesson', e);
       alert('ההרשמה לשעה נכשלה. רענן את הדף ונסה שוב.');
@@ -2659,16 +2759,20 @@ function MusicScheduler() {
       if (seen.has(key)) return; seen.add(key);
       const stu     = sl.sid ? enrichedStudents.find(s => s.id === sl.sid) : null;
       const removed = stu ? cancelledIds.includes(stu.id) : false;
-      let state = 'free', name = null;
+      let state = 'free', name = null, phone = '';
       if (isBlocked(sl.di, sl.t))     state = 'blocked';
-      else if (stu && !removed)     { state = 'taken'; name = stu.name; }
-      out.push({ di: sl.di, t: sl.t, state, name });
+      else if (stu && !removed)     {
+        state = 'taken'; name = stu.name;
+        // Only for students whose contact sharing is on. Never a code.
+        if (stu.shareContact !== false) phone = stu.phone || '';
+      }
+      out.push({ di: sl.di, t: sl.t, state, name, phone });
     });
 
     (extraSlots || []).forEach(sl => {
       const key = `${sl.di}_${sl.t}`;
       if (seen.has(key)) return; seen.add(key);
-      out.push({ di: sl.di, t: sl.t, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null });
+      out.push({ di: sl.di, t: sl.t, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null, phone: '' });
     });
 
     return out;
@@ -2700,8 +2804,8 @@ function MusicScheduler() {
 
       // The board is what students receive: slot states and names only —
       // never a code, a phone number, or the student list.
-      batch.set(boardRef(teacherUid, ws), {
-        weekStart: ws, note: note || '',
+      batch.set(boardRef(teacher?.boardKey, ws), {
+        teacherId: teacherUid, weekStart: ws, note: note || '',
         studioName: teacher?.studioName || '',
         slots: buildBoardSlots(cancelledIds, blockedSlots, extraSlots),
         holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
@@ -2711,7 +2815,7 @@ function MusicScheduler() {
       // Students may amend the claims map but never create it, so publishing
       // is what opens the week for booking. merge:true leaves other claims
       // untouched when the week is republished.
-      batch.set(claimsRef(teacherUid, ws), freed, { merge:true });
+      batch.set(claimsRef(teacher?.boardKey, ws), { teacherId: teacherUid, weekStart: ws, slots: freed }, { merge:true });
 
       await batch.commit();
     } catch (e) { console.error('pubWeek', e); alert('הפרסום נכשל. בדוק את החיבור ונסה שוב.'); }
@@ -2719,11 +2823,11 @@ function MusicScheduler() {
 
   async function clearPublishedWeek(ws) {
     try {
-      const plans = { ...(teacher?.weekPlans || {}) };
-      delete plans[ws];
-      await teacherRef().set({ weekPlans: plans }, { merge:true });
-      await boardRef(teacherUid, ws).delete().catch(() => {});
-      await claimsRef(teacherUid, ws).delete().catch(() => {});
+      // set(merge) deep-merges maps, so an omitted key survives — the plan has
+      // to be deleted explicitly or the week still reads as published.
+      await teacherRef().update({ [`weekPlans.${ws}`]: firebase.firestore.FieldValue.delete() });
+      await boardRef(teacher?.boardKey, ws).delete().catch(() => {});
+      await claimsRef(teacher?.boardKey, ws).delete().catch(() => {});
     } catch (e) { console.error('clearPublishedWeek', e); }
   }
 
@@ -2779,11 +2883,11 @@ function MusicScheduler() {
       const byWeek = {};
       held.forEach(l => {
         const ws = wkStart(l.date);
-        (byWeek[ws] = byWeek[ws] || {})[claimKey(parseD(l.date).getDay(), l.time)] =
+        (byWeek[ws] = byWeek[ws] || {})[`slots.${claimKey(parseD(l.date).getDay(), l.time)}`] =
           firebase.firestore.FieldValue.delete();
       });
       await Promise.all(Object.entries(byWeek).map(([ws, patch]) =>
-        claimsRef(teacherUid, ws).set(patch, { merge:true }).catch(() => {})));
+        claimsRef(teacher?.boardKey, ws).update(patch).catch(() => {})));
 
       const snap = await studentRef(sid).collection('lessons').get();
       for (let i = 0; i < snap.docs.length; i += 400) {
@@ -2792,9 +2896,46 @@ function MusicScheduler() {
         await b.commit();
       }
       await studentRef(sid).delete();
+      // Their name and phone are still on any week already published.
+      await Promise.all([republishBoard(THIS_WK), republishBoard(NEXT_WK)]);
     } catch (e) { console.error('deleteStudent', e); }
   }
 
+  // Rewrite an already-published week from current data. Used whenever
+  // something changed that the published board would otherwise keep showing.
+  async function republishBoard(ws) {
+    const plan = teacher?.weekPlans?.[ws];
+    if (!plan || !teacher?.boardKey) return;
+    await boardRef(teacher.boardKey, ws).set({
+      slots: buildBoardSlots(plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
+    }, { merge:true }).catch(e => console.error('republishBoard', e));
+  }
+
+  // Claims are written at booking time and hold a snapshot of the phone, so
+  // they need scrubbing too.
+  async function rewriteClaimsFor(sid, phone) {
+    const held = lessons.filter(l => l.sid === sid && HOLDS.includes(l.status) && l.date >= THIS_WK);
+    const stu  = enrichedStudents.find(s => s.id === sid);
+    const byWeek = {};
+    held.forEach(l => {
+      const ws = wkStart(l.date);
+      (byWeek[ws] = byWeek[ws] || {})[claimKey(parseD(l.date).getDay(), l.time)] =
+        { name: stu?.name || '', phone };
+    });
+    await Promise.all(Object.entries(byWeek).map(([ws, slots]) =>
+      claimsRef(teacher?.boardKey, ws).set({ slots }, { merge:true }).catch(() => {})));
+  }
+
+  async function setShareContact(sid, on) {
+    try {
+      await studentRef(sid).update({ shareContact: !!on });
+      const stu = enrichedStudents.find(s => s.id === sid);
+      // Republish so the change takes effect on weeks already out, rather than
+      // leaving the number visible until the teacher happens to publish again.
+      await Promise.all([republishBoard(THIS_WK), republishBoard(NEXT_WK)]);
+      await rewriteClaimsFor(sid, on ? (stu?.phone || '') : '');
+    } catch (e) { console.error('setShareContact', e); }
+  }
   function assignSecondSlot(sid, slot) {
     return studentRef(sid).update({ secondSlot: { ...slot, since: TODAY } })
                           .catch(e => console.error(e));
@@ -2829,13 +2970,14 @@ function MusicScheduler() {
   }
 
   // Shared by "approve a registration" and "add a student myself".
-  async function createStudent({ name, phone, parent, type, di, t }, pendingId) {
+  async function createStudent({ name, phone, parent, type, di, t, share }, pendingId) {
     const code  = await allocCode();
     const fixed = type === 'fixed' && di != null && t;
     const batch = db.batch();
     batch.set(studentRef(code), {
-      teacherId: teacherUid, code,
+      teacherId: teacherUid, code, boardKey: teacher?.boardKey || '',
       name: name.trim(), phone: phone || '', parent: parent || '',
+      shareContact: share !== false,
       type: fixed ? 'fixed' : 'flexible', status: 'active',
       di: fixed ? di : null, t: fixed ? t : null,
       secondSlot: null, createdAt: new Date().toISOString(),
@@ -2905,7 +3047,7 @@ function MusicScheduler() {
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
-    addStudent, teacher, me, logout,
+    addStudent, setShareContact, teacher, me, logout,
   };
 
   if (isTeacher) {
