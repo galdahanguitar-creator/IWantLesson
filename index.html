@@ -581,6 +581,13 @@ function TeacherView({ ctx }) {
         {tab==='students' && <TeacherStudentsTab ctx={ctx} />}
         {tab==='requests' && <TeacherRequestsTab ctx={ctx} />}
       </div>
+
+      {/* Lives here, not inside a tab: a student can be created from the
+          Students tab as well as from Requests, and the code has to be shown
+          either way. */}
+      {ctx.approvedInfo && (
+        <ApprovedCodeModal info={ctx.approvedInfo} onClose={ctx.clearApprovedInfo} />
+      )}
     </div>
   );
 }
@@ -1422,7 +1429,13 @@ function TeacherStudentsTab({ ctx }) {
         </div>
         <div style={S.card}>
           <div style={{ fontSize:18, fontWeight:500, marginBottom:4 }}>{stu.name}</div>
-          <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:12 }}>{stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}</div>
+          <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:10 }}>
+            {stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}
+          </div>
+          <button style={{ ...S.btn('info'), width:'100%', marginBottom:12, fontSize:12.5 }}
+            onClick={() => ctx.showCode(stu.name, stu.code)}>
+            🔗 הצג שוב את הקוד וההודעה לוואטסאפ
+          </button>
           <div style={{ fontSize:13, marginBottom:8 }}><span style={{ fontWeight:500 }}>{stats.happened}</span> / 32 שיעורים שהתקיימו</div>
           <div style={{ height:8, background:'var(--color-background-secondary)', borderRadius:4, marginBottom:12, overflow:'hidden' }}>
             <div style={{ height:'100%', width:`${Math.min(progress,100)}%`, background:progress>=100?'var(--color-text-success)':'var(--color-text-info)', borderRadius:4 }} />
@@ -1758,7 +1771,7 @@ function ApprovedCodeModal({ info, onClose }) {
 
 // ── Teacher: Cancellation Requests + Pending Registrations ──────────────────
 function TeacherRequestsTab({ ctx }) {
-  const { lessons, students, updLesson, pendingStudents, approveStudent, rejectStudent, approvedInfo, clearApprovedInfo, pubNext, NEXT_WK, inWk: _inWk } = ctx;
+  const { lessons, students, updLesson, pendingStudents, approveStudent, rejectStudent, pubNext, NEXT_WK } = ctx;
   const [approvingId, setApprovingId] = useState(null);
   const [assignType,  setAssignType]  = useState('flexible');
   const [assignDi,    setAssignDi]    = useState(1);
@@ -1780,15 +1793,13 @@ function TeacherRequestsTab({ ctx }) {
   }) : [];
   const pendingStu    = pendingStudents || [];
 
-  if (pendingCancel.length===0 && pendingStu.length===0 && !approvedInfo && unregisteredFlex.length===0) return (
+  if (pendingCancel.length===0 && pendingStu.length===0 && unregisteredFlex.length===0) return (
     <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>אין בקשות ממתינות</div>
   );
 
   return (
     <div>
       {/* ── Approved code modal ── */}
-      {approvedInfo && <ApprovedCodeModal info={approvedInfo} onClose={clearApprovedInfo} />}
-
       {/* ── Pending registrations ── */}
       {pendingStu.length > 0 && (
         <>
@@ -3047,7 +3058,8 @@ function MusicScheduler() {
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
-    addStudent, setShareContact, teacher, me, logout,
+    addStudent, setShareContact, showCode: (name, code) => setApprovedInfo({ name, code }),
+    teacher, me, logout,
   };
 
   if (isTeacher) {
