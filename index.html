@@ -98,25 +98,20 @@ function weeksBetween(from, to, cap = 16) {
 // document the first time she signs in, so this never silently expires and two
 // teachers can keep different calendars.
 const DEFAULT_HOLIDAYS = [
-  { name:'ראש השנה',     s:'2026-09-11', e:'2026-09-13' },
-  { name:'יום כיפור',    s:'2026-09-20', e:'2026-09-21' },
-  { name:'סוכות',        s:'2026-09-25', e:'2026-10-03' },
-  { name:'חנוכה',        s:'2026-12-04', e:'2026-12-12' },
-  { name:'ט"ו בשבט',     s:'2027-01-23', e:'2027-01-23' },
-  { name:'פורים',        s:'2027-03-22', e:'2027-03-23' },
-  { name:'פסח',          s:'2027-04-21', e:'2027-04-29' },
-  { name:'יום השואה',    s:'2027-05-04', e:'2027-05-04' },
-  { name:'יום הזיכרון',  s:'2027-05-11', e:'2027-05-11' },
-  { name:'יום העצמאות',  s:'2027-05-12', e:'2027-05-12' },
-  { name:'שבועות',       s:'2027-06-10', e:'2027-06-11' },
-  { name:'ראש השנה',     s:'2027-10-02', e:'2027-10-04' },
-  { name:'יום כיפור',    s:'2027-10-11', e:'2027-10-12' },
-  { name:'סוכות',        s:'2027-10-16', e:'2027-10-24' },
-  { name:'חנוכה',        s:'2027-12-25', e:'2028-01-01' },
-  { name:'פורים',        s:'2028-03-12', e:'2028-03-13' },
-  { name:'פסח',          s:'2028-04-11', e:'2028-04-18' },
-  { name:'יום העצמאות',  s:'2028-05-02', e:'2028-05-02' },
-  { name:'שבועות',       s:'2028-05-31', e:'2028-06-01' },
+  // Chof HaCarmel school calendar, 2026-27. Shared by every teacher in the
+  // school as the starting point; each can then edit her own copy.
+  { name:'ראש השנה',    s:'2026-09-11', e:'2026-09-13' },
+  { name:'יום כיפור',   s:'2026-09-20', e:'2026-09-21' },
+  { name:'גשר חופש',    s:'2026-09-22', e:'2026-09-24' },
+  { name:'סוכות',       s:'2026-09-25', e:'2026-10-03' },
+  { name:'בחירות',      s:'2026-10-27', e:'2026-10-27' },
+  { name:'חנוכה',       s:'2026-12-06', e:'2026-12-12' },
+  { name:'ט"ו בשבט',    s:'2027-01-22', e:'2027-01-23' },
+  { name:'פורים',       s:'2027-03-23', e:'2027-03-24' },
+  { name:'פסח',         s:'2027-04-13', e:'2027-04-28' },
+  { name:'יום הזיכרון', s:'2027-05-11', e:'2027-05-11' },
+  { name:'יום העצמאות', s:'2027-05-12', e:'2027-05-12' },
+  { name:'שבועות',      s:'2027-06-10', e:'2027-06-11' },
 ];
 
 // Active holiday list — swapped in once the tenant's settings load. Kept as a
@@ -565,13 +560,14 @@ function TeacherView({ ctx }) {
   return (
     <div style={S.page}>
       <div style={S.header}>
-        <h1 style={S.title}>ממשק מורה</h1>
+        <h1 style={S.title}>{ctx.teacher?.studioName || 'ממשק מורה'}</h1>
         <button style={S.btn('ghost')} onClick={logout}>יציאה</button>
       </div>
       <div style={S.tabs}>
-        {['week','nextweek','students','requests'].map(t => (
+        {['week','nextweek','students','requests','settings'].map(t => (
           <button key={t} style={S.tab(tab===t)} onClick={() => setTab(t)}>
-            {t==='week'?'השבוע':t==='nextweek'?'שבוע הבא':t==='students'?'תלמידים':`בקשות${pendingCount>0?` (${pendingCount})`:''}`}
+            {t==='week'?'השבוע':t==='nextweek'?'שבוע הבא':t==='students'?'תלמידים'
+              :t==='requests'?`בקשות${pendingCount>0?` (${pendingCount})`:''}`:'⚙ הגדרות'}
           </button>
         ))}
       </div>
@@ -580,6 +576,7 @@ function TeacherView({ ctx }) {
         {tab==='nextweek' && <TeacherNextWeekTab ctx={ctx} />}
         {tab==='students' && <TeacherStudentsTab ctx={ctx} />}
         {tab==='requests' && <TeacherRequestsTab ctx={ctx} />}
+        {tab==='settings' && <TeacherSettingsTab ctx={ctx} />}
       </div>
 
       {/* Lives here, not inside a tab: a student can be created from the
@@ -1930,6 +1927,146 @@ function TeacherRequestsTab({ ctx }) {
   );
 }
 
+// ── Teacher: Settings ─────────────────────────────────────────────────────────
+// Everything a teacher needs to run her own studio without going through the
+// person who set the system up: her studio's name, her registration link, and
+// her own holiday calendar.
+function TeacherSettingsTab({ ctx }) {
+  const { teacher, updateTeacher } = ctx;
+  const [studio, setStudio] = useState(teacher?.studioName || '');
+  const [name,   setName]   = useState(teacher?.name || '');
+  const [saved,  setSaved]  = useState('');
+  const [copied, setCopied] = useState(false);
+  const [hName,  setHName]  = useState('');
+  const [hFrom,  setHFrom]  = useState('');
+  const [hTo,    setHTo]    = useState('');
+
+  const isLocal = location.protocol === 'file:';
+  const regLink = `${location.origin}${location.pathname}#register/${teacher?.uid || ''}`;
+  const holidays = (teacher?.holidays || []).slice().sort((a,b) => a.s.localeCompare(b.s));
+  const upcoming = holidays.filter(h => h.e >= todayS());
+
+  async function saveProfile() {
+    await updateTeacher({ studioName: studio.trim(), name: name.trim() });
+    setSaved('פרטי האולפן נשמרו'); setTimeout(() => setSaved(''), 2500);
+  }
+
+  async function addHoliday() {
+    if (!hName.trim() || !hFrom) return;
+    const next = [...(teacher?.holidays || []), { name:hName.trim(), s:hFrom, e:hTo || hFrom }];
+    await updateTeacher({ holidays: next });
+    setHName(''); setHFrom(''); setHTo('');
+  }
+
+  async function removeHoliday(h) {
+    await updateTeacher({ holidays: (teacher?.holidays || []).filter(x => !(x.name===h.name && x.s===h.s)) });
+  }
+
+  async function copyLink() {
+    try { await navigator.clipboard.writeText(regLink); setCopied(true); setTimeout(() => setCopied(false), 2500); }
+    catch (e) { setCopied(false); }
+  }
+
+  return (
+    <div>
+      {/* ── studio identity ── */}
+      <div style={S.card}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:12 }}>פרטי האולפן</div>
+        <div style={S.label}>שם האולפן</div>
+        <input style={{ ...S.input, marginBottom:10 }} value={studio}
+          onChange={e => setStudio(e.target.value)} placeholder="למשל: אולפן מוסיקה חוף הכרמל" />
+        <div style={{ fontSize:11, color:'var(--color-text-secondary)', margin:'0 0 12px' }}>
+          מופיע בטופס ההרשמה שהתלמידים החדשים רואים.
+        </div>
+        <div style={S.label}>שמך</div>
+        <input style={{ ...S.input, marginBottom:12 }} value={name}
+          onChange={e => setName(e.target.value)} placeholder="שם המורה" />
+        <button style={{ ...S.btn('primary'), width:'100%' }} onClick={saveProfile}>שמור</button>
+        {saved && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{saved}</div>}
+      </div>
+
+      {/* ── registration link ── */}
+      <div style={{ ...S.card, marginTop:10 }}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>קישור ההרשמה שלך</div>
+        <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:10, lineHeight:1.6 }}>
+          שלח אותו לתלמידים חדשים, או שים אותו באתר שלך. מי שנרשם דרכו מגיע
+          ללשונית <strong>בקשות</strong> שלך לאישור — ולא לאף מורה אחרת.
+        </div>
+        {isLocal ? (
+          <div style={{ background:'var(--color-background-danger)', color:'var(--color-text-danger)',
+                        borderRadius:8, padding:'10px 12px', fontSize:12.5, lineHeight:1.6 }}>
+            האפליקציה פתוחה מקובץ במחשב. פתח אותה מהכתובת שלה באינטרנט כדי לקבל קישור תקין.
+          </div>
+        ) : (
+          <>
+            <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'10px 12px',
+                          fontSize:11.5, direction:'ltr', wordBreak:'break-all', marginBottom:10,
+                          fontFamily:'monospace', color:'var(--color-text-secondary)' }}>
+              {regLink}
+            </div>
+            <button style={{ ...S.btn('info'), width:'100%' }} onClick={copyLink}>
+              {copied ? '✓ הקישור הועתק' : '🔗 העתק קישור הרשמה'}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* ── holidays ── */}
+      <div style={{ ...S.card, marginTop:10 }}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>חגים וחופשות</div>
+        <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:12, lineHeight:1.6 }}>
+          תאריכים שמסומנים בלוח, ושלא נספרים אוטומטית כשיעורים שהתקיימו.
+          הרשימה שלך בלבד — כל מורה מנהלת את שלה.
+        </div>
+
+        {upcoming.length === 0 ? (
+          <div style={{ fontSize:13, color:'var(--color-text-secondary)', textAlign:'center', padding:'10px 0' }}>
+            אין חגים עתידיים ברשימה
+          </div>
+        ) : upcoming.map(h => (
+          <div key={`${h.name}_${h.s}`} style={{ ...S.row, justifyContent:'space-between',
+                 padding:'7px 10px', marginBottom:5, background:'var(--color-background-secondary)', borderRadius:6 }}>
+            <span style={{ fontSize:13 }}>
+              <strong>{h.name}</strong>
+              <span style={{ color:'var(--color-text-secondary)', marginRight:6 }}>
+                {dd(h.s)}{h.e !== h.s ? ` – ${dd(h.e)}` : ''}
+              </span>
+            </span>
+            <button style={{ ...S.btn('danger'), padding:'3px 10px', fontSize:11 }}
+              onClick={() => removeHoliday(h)}>הסר</button>
+          </div>
+        ))}
+
+        <div style={{ borderTop:'1px dashed var(--color-border-tertiary)', marginTop:12, paddingTop:12 }}>
+          <button style={{ ...S.btn('info'), width:'100%', marginBottom:12, fontSize:12.5 }}
+            onClick={() => { if (window.confirm('לטעון את לוח החגים של בית הספר? הרשימה הנוכחית תוחלף.')) updateTeacher({ holidays: DEFAULT_HOLIDAYS }); }}>
+            🏫 טען את לוח החגים של בית הספר
+          </button>
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', margin:'-6px 0 14px', lineHeight:1.5 }}>
+            מחליף את הרשימה בלוח המשותף של בית הספר לשנת הלימודים. אחר כך אפשר להתאים.
+          </div>
+
+          <div style={S.label}>הוספת חג או חופשה</div>
+          <input style={{ ...S.input, marginBottom:8 }} value={hName}
+            onChange={e => setHName(e.target.value)} placeholder="שם (למשל: חופשת פסח)" />
+          <div style={{ ...S.row, gap:8, marginBottom:10 }}>
+            <div style={{ flex:1 }}>
+              <div style={S.label}>מתאריך</div>
+              <input type="date" style={S.input} value={hFrom} onChange={e => setHFrom(e.target.value)} />
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={S.label}>עד (אופציונלי)</div>
+              <input type="date" style={S.input} value={hTo} onChange={e => setHTo(e.target.value)} />
+            </div>
+          </div>
+          <button style={{ ...S.btn('success'), width:'100%', opacity:(hName.trim()&&hFrom)?1:0.45 }}
+            disabled={!hName.trim() || !hFrom} onClick={addHoliday}>＋ הוסף</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // STUDENT VIEW
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3114,7 +3251,7 @@ function MusicScheduler() {
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
-    addStudent, setShareContact, showCode: (name, code) => setApprovedInfo({ name, code }),
+    addStudent, setShareContact, updateTeacher, showCode: (name, code) => setApprovedInfo({ name, code }),
     teacher, me, logout,
   };
 
