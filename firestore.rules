@@ -1,0 +1,182 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  אולפן מוסיקה — Firestore Security Rules
+//
+//  Model
+//  ─────
+//  teachers/{tid}                      private to that teacher (uid == tid)
+//  teachers/{tid}/board/{weekStart}    published week — any signed-in reader;
+//                                      slot states and display names, never a
+//                                      code, a phone number, or the roster
+//  teachers/{tid}/claims/{weekStart}   live bookings made after publishing
+//  students/{code}                     `code` IS the document id and the secret
+//  students/{code}/lessons/{lessonId}  reachable only by knowing the code
+//  pending_students/{autoId}           write-only inbox for registrations
+//
+//  Core idea
+//  ─────────
+//  Firestore separates `get` (one document, exact id) from `list` (a query).
+//  A student proves who they are by knowing their document id. Nobody can
+//  enumerate the collection, so no one can discover who exists or harvest
+//  names and phone numbers.
+// ═══════════════════════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── helpers ────────────────────────────────────────────────────────────
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // A teacher is a signed-in, non-anonymous account whose uid == the tenant id.
+    function isTeacher(tid) {
+      return request.auth != null
+          && request.auth.uid == tid
+          && request.auth.token.firebase.sign_in_provider == 'password';
+    }
+
+    function ownsIncoming() {
+      return isTeacher(request.resource.data.teacherId);
+    }
+
+    function ownsExisting() {
+      return isTeacher(resource.data.teacherId);
+    }
+
+    // Fields a student may touch on their own lesson (cancel / rebook).
+    function studentLessonFieldsOnly() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'reason', 'cancelledAt', 'lateCancel']);
+    }
+
+    // A student may book, request a cancellation, or give up a slot — never
+    // mark a lesson as held, and never resolve their own cancellation as
+    // justified. Those are the teacher's calls.
+    function studentSettableStatus() {
+      return request.resource.data.status in ['scheduled', 'pending_cancel', 'moved'];
+    }
+
+    // The teacher this code belongs to, read from the student's own document.
+    // This is what stops a student from filing a lesson into another
+    // teacher's tenant by simply naming a different teacherId.
+    function codeOwner(code) {
+      return get(/databases/$(database)/documents/students/$(code)).data.teacherId;
+    }
+
+
+    // ── teachers ───────────────────────────────────────────────────────────
+    // The private tenant document: name, settings, holidays, and `slots`
+    // (which maps each recurring slot to a student code). Never readable by
+    // students — that mapping is exactly what must not leak.
+    match /teachers/{tid} {
+      allow get, list: if isTeacher(tid);
+      allow update, delete: if isTeacher(tid);
+      // Creation happens once, by the teacher, right after their first sign-in.
+      allow create: if isTeacher(tid);
+
+      // The published weekly board. Slot states plus the display names the
+      // teacher chose to show. Never codes, phone numbers, or the roster —
+      // those stay on the private document above.
+      match /board/{weekStart} {
+        allow get, list: if signedIn();
+        allow write: if isTeacher(tid);
+      }
+
+      // Live slot claims made after publishing, so two students cannot book
+      // the same hour. One small map per week: slotKey -> {name}. Deliberately
+      // no code and no student id — this document is readable by everyone.
+      //
+      // Known limit: nothing binds a claim to the student who wrote it, so a
+      // determined student could clear someone else's. The lesson document
+      // remains the record of truth and the teacher sees it, so this is
+      // recoverable and never a disclosure. Closing it properly needs
+      // server-side auth (see README, "Path B").
+      match /claims/{weekStart} {
+        allow get, list: if signedIn();
+        allow write: if isTeacher(tid);
+        // Students may only amend a claims document the teacher already
+        // created by publishing that week — no create, so nobody can conjure
+        // claims for arbitrary teachers or unpublished weeks.
+        allow update: if signedIn()
+                      && request.resource.data.diff(resource.data).affectedKeys().size() <= 2;
+      }
+    }
+
+
+    // ── students ───────────────────────────────────────────────────────────
+    // The document id IS the login code. `get` is open to any signed-in
+    // client because reaching it already requires knowing the exact id;
+    // `list` is restricted so the collection cannot be enumerated.
+    match /students/{code} {
+      allow get:  if signedIn();
+      allow list: if ownsExisting();
+
+      allow create: if ownsIncoming();
+      allow update: if ownsExisting() && ownsIncoming();
+      allow delete: if ownsExisting();
+
+      // ── that student's lessons ──────────────────────────────────────────
+      // The code sits in the path, so anyone who can address this collection
+      // has already proven they hold it.
+      match /lessons/{lessonId} {
+        allow get, list: if signedIn();
+
+        // The teacher has full control over their own tenant's lessons.
+        allow create: if ownsIncoming();
+        allow update, delete: if ownsExisting();
+
+        // Recurring lessons are projected, not stored — so the FIRST thing a
+        // student ever does to one (booking it, or asking to cancel it) is a
+        // create, not an update. Restricting create to 'scheduled' would make
+        // cancelling a regular lesson silently impossible.
+        allow create: if signedIn()
+                      && request.resource.data.sid == code
+                      && request.resource.data.teacherId == codeOwner(code)
+                      && studentSettableStatus();
+
+        // On an existing lesson they may touch only these four fields, and only
+        // while it is still live. Once a lesson has been adjudicated — held,
+        // cancelled either way, no-show, moved — it is frozen to the student.
+        // Blacklisting `teacher_cancelled` alone was not enough: a re-booking
+        // merges `status:'scheduled'` over the record and would have erased an
+        // unjustified-cancellation penalty.
+        allow update: if signedIn()
+                      && studentLessonFieldsOnly()
+                      && studentSettableStatus()
+                      && resource.data.status in ['scheduled', 'pending_cancel'];
+      }
+    }
+
+    // Teacher's week view runs as a collectionGroup query across every
+    // student's lessons. Only rows carrying that teacher's id come back.
+    match /{path=**}/lessons/{lessonId} {
+      allow list: if ownsExisting();
+    }
+
+
+    // ── pending registrations ──────────────────────────────────────────────
+    // A write-only inbox: anyone may drop a request in, only the owning
+    // teacher can read, approve, or reject it. Nobody can list what others
+    // have submitted.
+    match /pending_students/{reqId} {
+      // `.get(field, default)` rather than direct access: a missing field would
+      // otherwise raise and deny a legitimate registration.
+      allow create: if signedIn()
+                    && request.resource.data.teacherId is string
+                    && request.resource.data.get('name', '').size() > 0
+                    && request.resource.data.get('name', '').size() < 100
+                    && request.resource.data.get('phone', '').size() < 40
+                    && request.resource.data.get('parent', '').size() < 100;
+
+      allow get, list, update, delete: if ownsExisting();
+    }
+
+
+    // ── everything else is closed ──────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

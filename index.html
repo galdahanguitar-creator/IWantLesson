@@ -1,0 +1,2936 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>אולפן מוסיקה חוף הכרמל</title>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <style>
+:root {
+  --color-background-primary:   #ffffff;
+  --color-background-secondary: #f0f7ff;
+  --color-background-tertiary:  #e3edf8;
+  --color-background-danger:    #FCEBEB;
+  --color-background-success:   #EAF3DE;
+  --color-background-warning:   #FAEEDA;
+  --color-background-info:      #E6F1FB;
+  --color-text-primary:   #0f172a;
+  --color-text-secondary: #64748b;
+  --color-text-danger:    #A32D2D;
+  --color-text-success:   #27500A;
+  --color-text-warning:   #854F0B;
+  --color-text-info:      #185FA5;
+  --color-border-tertiary:  #dbeafe;
+  --color-border-secondary: #B5D4F4;
+  --color-border-info:      #93c5fd;
+  --border-radius-lg: 14px;
+  --border-radius-md: 8px;
+  --primary: #378ADD;
+  --primary-dark: #185FA5;
+  --primary-light: #E6F1FB;
+  --primary-border: #B5D4F4;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Arial, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; min-height: 100%; }
+body { font-family: var(--font-sans); background: var(--color-background-tertiary);
+       color: var(--color-text-primary); -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; }
+textarea, input, select { font-family: inherit; }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: #378ADD !important;
+  box-shadow: 0 0 0 3px rgba(55,138,221,0.15);
+}
+</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useMemo, useRef, useEffect } = React;
+
+// ── Firebase config ───────────────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCl0G_SiV1GJGnGIg5X-l_zo6EX4XldJJs",
+  authDomain: "i-want-lesson.firebaseapp.com",
+  projectId: "i-want-lesson",
+  storageBucket: "i-want-lesson.firebasestorage.app",
+  messagingSenderId: "310804485528",
+  appId: "1:310804485528:web:82d393afbf1268a6e7c7ed"
+};
+
+
+// ── Date utilities ─────────────────────────────────────────────────────────────
+const DAY_HE = ['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'];
+function parseD(s) { return new Date(s + 'T12:00:00'); }
+function fmtD(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function addDays(s, n) { const d = parseD(s); d.setDate(d.getDate() + n); return fmtD(d); }
+function wkStart(s) { const d = parseD(s); d.setDate(d.getDate() - d.getDay()); return fmtD(d); }
+function todayS() { return fmtD(new Date()); }
+function dd(s) { const d = parseD(s); return `${d.getDate()}/${d.getMonth()+1}`; }
+function inWk(ds, ws) { return ds >= ws && ds < addDays(ws, 7); }
+function hoursUntil(dateS, time) { return (new Date(`${dateS}T${time}:00`) - new Date()) / 3600000; }
+function isValidTime(t) { const h = parseInt(t, 10); return h >= 7 && h < 22; }
+
+// ── Date helpers used by the projection ──────────────────────────────────────
+// The date of a given weekday (di) inside the week that starts at weekStart.
+function dateOfDi(weekStart, di) {
+  const d = parseD(weekStart);
+  while (d.getDay() !== di) d.setDate(d.getDate() + 1);
+  return fmtD(d);
+}
+// Every week start from `from` up to and including `to`, capped for safety.
+function weeksBetween(from, to, cap = 16) {
+  const out = [];
+  let w = wkStart(from);
+  const end = wkStart(to);
+  while (w <= end && out.length < cap) { out.push(w); w = addDays(w, 7); }
+  return out;
+}
+
+// ── Holidays ─────────────────────────────────────────────────────────────────
+// Default list only. Each teacher gets her own editable copy in her settings
+// document the first time she signs in, so this never silently expires and two
+// teachers can keep different calendars.
+const DEFAULT_HOLIDAYS = [
+  { name:'ראש השנה',     s:'2026-09-11', e:'2026-09-13' },
+  { name:'יום כיפור',    s:'2026-09-20', e:'2026-09-21' },
+  { name:'סוכות',        s:'2026-09-25', e:'2026-10-03' },
+  { name:'חנוכה',        s:'2026-12-04', e:'2026-12-12' },
+  { name:'ט"ו בשבט',     s:'2027-01-23', e:'2027-01-23' },
+  { name:'פורים',        s:'2027-03-22', e:'2027-03-23' },
+  { name:'פסח',          s:'2027-04-21', e:'2027-04-29' },
+  { name:'יום השואה',    s:'2027-05-04', e:'2027-05-04' },
+  { name:'יום הזיכרון',  s:'2027-05-11', e:'2027-05-11' },
+  { name:'יום העצמאות',  s:'2027-05-12', e:'2027-05-12' },
+  { name:'שבועות',       s:'2027-06-10', e:'2027-06-11' },
+  { name:'ראש השנה',     s:'2027-10-02', e:'2027-10-04' },
+  { name:'יום כיפור',    s:'2027-10-11', e:'2027-10-12' },
+  { name:'סוכות',        s:'2027-10-16', e:'2027-10-24' },
+  { name:'חנוכה',        s:'2027-12-25', e:'2028-01-01' },
+  { name:'פורים',        s:'2028-03-12', e:'2028-03-13' },
+  { name:'פסח',          s:'2028-04-11', e:'2028-04-18' },
+  { name:'יום העצמאות',  s:'2028-05-02', e:'2028-05-02' },
+  { name:'שבועות',       s:'2028-05-31', e:'2028-06-01' },
+];
+
+// Active holiday list — swapped in once the tenant's settings load. Kept as a
+// module-level binding so the presentational components stay prop-free.
+let HOLIDAYS = DEFAULT_HOLIDAYS;
+function setHolidays(list) { HOLIDAYS = Array.isArray(list) && list.length ? list : DEFAULT_HOLIDAYS; }
+function getHoliday(ds) { return HOLIDAYS.find(h => ds >= h.s && ds <= h.e) || null; }
+
+// ── Student access codes ──────────────────────────────────────────────────────
+// The code IS the Firestore document id, and it is the only thing standing
+// between a stranger and that student's record — so it must be unguessable.
+// Alphabet excludes 0/O/1/I/L to survive being read aloud over the phone.
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+function genCode(len = 6) {
+  const bytes = new Uint8Array(len);
+  crypto.getRandomValues(bytes);
+  let out = '';
+  for (let i = 0; i < len; i++) out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  return out;
+}
+
+// ── Lesson projection ─────────────────────────────────────────────────────────
+// Lessons are NOT stored ahead of time. The future is projected from the
+// teacher's recurring slots; a document exists only once something real has
+// happened to that lesson — it was held, cancelled, moved, or booked one-off.
+// This returns the same flat shape the whole UI already expects.
+function lessonId(sid, date, time, suffix)  { return `${sid}_${date}_${time}${suffix || ''}`; }
+
+function projectLessons(slots, students, real, weeks) {
+  const byId = new Map(real.map(l => [l.id, l]));
+  const used = new Set();
+  const out  = [];
+
+  function place(sid, date, time, suffix) {
+    const id = lessonId(sid, date, time, suffix);
+    if (byId.has(id)) { out.push(byId.get(id)); used.add(id); }
+    else out.push({ id, sid, date, time, status:'scheduled', reason:'', cancelledAt:null, virtual:true });
+  }
+
+  weeks.forEach(ws => {
+    // Primary recurring slot, from the teacher's schedule.
+    slots.forEach(slot => {
+      if (!slot.sid) return;                                        // open slot
+      if (!students.some(s => s.id === slot.sid)) return;           // stale sid
+      const date = dateOfDi(ws, slot.di);
+      // `since` records when this assignment started. Without it, projecting
+      // backwards would place today's schedule onto past weeks — inventing
+      // lessons at hours the student was never taught, and losing the hours
+      // they actually were.
+      if (slot.since && date < slot.since) return;
+      place(slot.sid, date, slot.t);
+    });
+    // Optional second weekly lesson, stored on the student.
+    students.forEach(s => {
+      if (!s.secondSlot) return;
+      const date = dateOfDi(ws, s.secondSlot.di);
+      if (s.secondSlot.since && date < s.secondSlot.since) return;
+      place(s.id, date, s.secondSlot.t, '_2nd');
+    });
+  });
+
+  // Anything real that the projection did not cover: history, one-off lessons,
+  // lessons whose slot has since been moved or deleted.
+  real.forEach(l => { if (!used.has(l.id)) out.push(l); });
+  return out;
+}
+
+// ── Shared styles ─────────────────────────────────────────────────────────────
+const S = {
+  page:   { direction:'rtl', fontFamily:'var(--font-sans)', padding:'0 0 80px', minHeight:'100vh', background:'var(--color-background-tertiary)' },
+  header: { background:'var(--color-background-primary)', borderBottom:'3px solid #378ADD', padding:'14px 16px', display:'flex', alignItems:'center', justifyContent:'space-between' },
+  title:  { fontSize:18, fontWeight:700, margin:0, color:'#185FA5' },
+  tabs:   { display:'flex', background:'var(--color-background-primary)', borderBottom:'0.5px solid var(--color-border-tertiary)', overflowX:'auto' },
+  tab:    (active) => ({ padding:'11px 16px', fontSize:13, fontWeight: active?600:400, color: active?'#378ADD':'var(--color-text-secondary)', cursor:'pointer', whiteSpace:'nowrap', background: active?'#f0f7ff':'none', border:'none', borderBottom: active?'2.5px solid #378ADD':'2.5px solid transparent' }),
+  body:   { padding:'12px 14px' },
+  card:   { background:'var(--color-background-primary)', border:'1px solid var(--color-border-tertiary)', borderRadius:'var(--border-radius-lg)', padding:'14px 16px', marginBottom:10 },
+  btn:    (variant='default') => ({
+    padding:'9px 18px', fontSize:13, fontWeight:600, borderRadius:'8px', cursor:'pointer', border:'1.5px solid',
+    ...(variant==='primary'   ? { background:'#378ADD', color:'#ffffff', borderColor:'#185FA5' } : {}),
+    ...(variant==='danger'    ? { background:'#FCEBEB', color:'#A32D2D', borderColor:'#F7C1C1' } : {}),
+    ...(variant==='success'   ? { background:'#EAF3DE', color:'#27500A', borderColor:'#C0DD97' } : {}),
+    ...(variant==='warning'   ? { background:'#FAEEDA', color:'#854F0B', borderColor:'#FAC775' } : {}),
+    ...(variant==='default'   ? { background:'var(--color-background-primary)', color:'var(--color-text-secondary)', borderColor:'var(--color-border-secondary)' } : {}),
+    ...(variant==='ghost'     ? { background:'transparent', color:'#378ADD', borderColor:'transparent' } : {}),
+    ...(variant==='info'      ? { background:'#E6F1FB', color:'#185FA5', borderColor:'#B5D4F4' } : {}),
+  }),
+  badge: (color='info') => ({
+    display:'inline-block', fontSize:11, padding:'3px 10px', borderRadius:6, fontWeight:600,
+    background:`var(--color-background-${color})`, color:`var(--color-text-${color})`,
+  }),
+  input: { width:'100%', fontSize:14, padding:'9px 12px', borderRadius:'8px', border:'1.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)', boxSizing:'border-box' },
+  row:   { display:'flex', gap:8, alignItems:'center' },
+  label: { fontSize:12, color:'var(--color-text-secondary)', marginBottom:4, fontWeight:500 },
+};
+
+const STATUS_META = {
+  scheduled:             { label:'מתוכנן',           color:'info' },
+  completed:             { label:'התקיים',           color:'success' },
+  moved:                 { label:'הועבר לשעה אחרת', color:'default' },
+  cancelled_justified:   { label:'בוטל (מוצדק)',     color:'warning' },
+  cancelled_unjustified: { label:'בוטל (לא מוצדק)',  color:'danger' },
+  teacher_cancelled:     { label:'בוטל ע"י המורה',   color:'default' },
+  pending_cancel:        { label:'ממתין לביטול',     color:'warning' },
+  no_show:               { label:'לא הגיע',          color:'danger' },
+};
+
+function StatusBadge({ status }) {
+  const m = STATUS_META[status] || { label:status, color:'default' };
+  return <span style={S.badge(m.color)}>{m.label}</span>;
+}
+
+function HolBadge({ date }) {
+  const h = getHoliday(date);
+  if (!h) return null;
+  return <span style={{ ...S.badge('warning'), marginRight:6, fontSize:10 }}>{h.name}</span>;
+}
+
+function Modal({ children, onClose }) {
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', zIndex:200, display:'flex', alignItems:'flex-end', justifyContent:'center' }} onClick={onClose}>
+      <div style={{ background:'var(--color-background-primary)', borderRadius:'18px 18px 0 0', padding:'20px 16px 40px', width:'100%', maxWidth:440, maxHeight:'90vh', overflowY:'auto' }} onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ── Week Calendar Grid ────────────────────────────────────────────────────────
+// Supports horizontal + vertical scroll. Header and time-col are sticky.
+// days: [{date, di}]
+// items: [{date, time, ...}]
+// renderItem(item, topPx, heightPx) → absolutely-positioned JSX
+// onColumnClick(di, date, timeStr) — optional, fires on empty column click
+function WeekCalendar({ days, items, renderItem, onColumnClick }) {
+  const MIN_H = 8, MAX_H = 16;
+  const PX_MIN = 1.55;
+  const GRID_H = (MAX_H - MIN_H) * 60 * PX_MIN;  // 744px
+  const TIME_W = 36;
+  const COL_MIN = 66; // min column width — allows 5 cols on a 375px screen
+  const ITEM_H = 45 * PX_MIN - 2;
+
+  const hours = Array.from({ length: MAX_H - MIN_H + 1 }, (_, i) => MIN_H + i);
+
+  function timeToTop(t) {
+    const [h, m] = t.split(':').map(Number);
+    return ((h - MIN_H) * 60 + m) * PX_MIN;
+  }
+
+  function handleColumnClick(di, date, e) {
+    if (!onColumnClick) return;
+    // offsetY is relative to the clicked element (column div) since children have pointerEvents:none or stopPropagation
+    const y = e.nativeEvent.offsetY;
+    let totalMins = y / PX_MIN;
+    let h = Math.floor(totalMins / 60) + MIN_H;
+    let m = Math.round((totalMins % 60) / 5) * 5;
+    if (m >= 60) { m = 0; h += 1; }
+    h = Math.min(Math.max(h, MIN_H), MAX_H - 1);
+    onColumnClick(di, date, `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`);
+  }
+
+  return (
+    <div style={{ border:'0.5px solid var(--color-border-tertiary)', borderRadius:12, overflow:'hidden', background:'var(--color-background-primary)', marginBottom:12, direction:'ltr' }}>
+      {/* Single scroll container — both axes */}
+      <div style={{ overflowX:'auto', overflowY:'auto', maxHeight:520 }}>
+        <div style={{ minWidth: TIME_W + days.length * COL_MIN, position:'relative' }}>
+
+          {/* ── Sticky header row ── */}
+          <div style={{ display:'flex', position:'sticky', top:0, zIndex:10, background:'var(--color-background-secondary)', borderBottom:'1px solid var(--color-border-tertiary)' }}>
+            {/* Corner cell — sticky left AND top */}
+            <div style={{ width:TIME_W, flexShrink:0, position:'sticky', left:0, zIndex:11, background:'var(--color-background-secondary)' }} />
+            {days.map(day => {
+              const hol = getHoliday(day.date);
+              const isToday = fmtD(new Date()) === day.date;
+              return (
+                <div key={day.date} style={{ flex:1, minWidth:COL_MIN, textAlign:'center', padding:'7px 2px', borderLeft:'0.5px solid var(--color-border-tertiary)' }}>
+                  <div style={{ fontSize:10, color:'var(--color-text-secondary)', marginBottom:1 }}>יום {DAY_HE[day.di]}</div>
+                  <div style={{
+                    fontSize:17, fontWeight:600, margin:'0 auto',
+                    width:26, height:26, lineHeight:'26px', borderRadius:'50%',
+                    color: isToday ? '#fff' : 'var(--color-text-primary)',
+                    background: isToday ? '#2563eb' : 'transparent',
+                  }}>{parseD(day.date).getDate()}</div>
+                  {hol && <div style={{ fontSize:9, color:'var(--color-text-warning)', overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{hol.name}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── Body row ── */}
+          <div style={{ display:'flex', height:GRID_H }}>
+            {/* Sticky time column */}
+            <div style={{ width:TIME_W, flexShrink:0, position:'sticky', left:0, zIndex:5, background:'var(--color-background-secondary)', height:GRID_H }}>
+              {hours.map(h => (
+                <div key={h} style={{ position:'absolute', top:(h-MIN_H)*60*PX_MIN-7, left:0, right:4, fontSize:9, color:'var(--color-text-secondary)', textAlign:'right', userSelect:'none', direction:'ltr', pointerEvents:'none' }}>
+                  {String(h).padStart(2,'0')}:00
+                </div>
+              ))}
+            </div>
+
+            {/* Day columns */}
+            {days.map(day => (
+              <div
+                key={day.date}
+                style={{ flex:1, minWidth:COL_MIN, height:GRID_H, position:'relative', borderLeft:'0.5px solid var(--color-border-tertiary)', cursor: onColumnClick ? 'crosshair' : 'default' }}
+                onClick={e => handleColumnClick(day.di, day.date, e)}
+              >
+                {hours.map(h => (
+                  <div key={h} style={{ position:'absolute', top:(h-MIN_H)*60*PX_MIN, left:0, right:0, borderTop:'0.5px solid var(--color-border-tertiary)', opacity:0.35, pointerEvents:'none' }} />
+                ))}
+                {hours.map(h => (
+                  <div key={`${h}.5`} style={{ position:'absolute', top:((h-MIN_H)*60+30)*PX_MIN, left:0, right:0, borderTop:'0.5px dashed var(--color-border-tertiary)', opacity:0.18, pointerEvents:'none' }} />
+                ))}
+                {items.filter(item => item.date === day.date).map(item =>
+                  renderItem(item, timeToTop(item.time), ITEM_H)
+                )}
+              </div>
+            ))}
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Loading ───────────────────────────────────────────────────────────────────
+function LoadingView({ seeding }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:16, background:'var(--color-background-tertiary)' }}>
+      <div style={{ fontSize:56, lineHeight:1 }}>🎸</div>
+      <div style={{ fontSize:15, color:'var(--color-text-secondary)' }}>
+        {seeding ? 'מאתחל מסד נתונים בפעם הראשונה... (כמה שניות)' : 'טוען...'}
+      </div>
+    </div>
+  );
+}
+
+// ── Student self-registration ─────────────────────────────────────────────────
+// Reached at #register/<teacherId> — each teacher hands out her own link, so a
+// request always lands in the right teacher's inbox.
+function RegisterView({ db, teacherId, studioName }) {
+  const [name,    setName]    = useState('');
+  const [phone,   setPhone]   = useState('');
+  const [parent,  setParent]  = useState('');
+  const [hasPref, setHasPref] = useState(false);
+  const [di,      setDi]      = useState(1);
+  const [time,    setTime]    = useState('09:00');
+  const [done,    setDone]    = useState(false);
+  const [busy,    setBusy]    = useState(false);
+  const [err,     setErr]     = useState('');
+
+  async function submit() {
+    if (!name.trim() || !phone.trim()) return;
+    setBusy(true); setErr('');
+    try {
+      await db.collection('pending_students').add({
+        teacherId,
+        name: name.trim(), phone: phone.trim(), parent: parent.trim(),
+        type: 'pending', di: hasPref ? di : null, t: hasPref ? time : null,
+        submittedAt: new Date().toISOString(),
+      });
+      setDone(true);
+    } catch(e) {
+      console.error(e);
+      setErr('שליחת הבקשה נכשלה. בדוק את החיבור לאינטרנט ונסה שוב.');
+    }
+    setBusy(false);
+  }
+
+  if (!teacherId) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:14, padding:24, background:'var(--color-background-tertiary)' }}>
+      <div style={{ fontSize:46 }}>🔗</div>
+      <h2 style={{ fontSize:18, fontWeight:600, textAlign:'center', margin:0 }}>קישור הרשמה לא תקין</h2>
+      <p style={{ fontSize:14, color:'var(--color-text-secondary)', textAlign:'center', margin:0, maxWidth:300 }}>
+        בקש מהמורה שלך את קישור ההרשמה המלא.
+      </p>
+    </div>
+  );
+
+  if (done) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:16, padding:20, background:'var(--color-background-tertiary)' }}>
+      <div style={{ fontSize:52 }}>✅</div>
+      <h2 style={{ fontSize:20, fontWeight:500, textAlign:'center', margin:0 }}>הבקשה נשלחה!</h2>
+      <p style={{ fontSize:14, color:'var(--color-text-secondary)', textAlign:'center', margin:0, maxWidth:280 }}>
+        המורה יאשר את הרישום שלך בקרוב ויישלח לך קוד כניסה אישי.
+      </p>
+    </div>
+  );
+
+  return (
+    <div style={{ direction:'rtl', fontFamily:'var(--font-sans)', minHeight:'100vh', background:'var(--color-background-tertiary)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div style={{ width:'100%', maxWidth:360 }}>
+        <h1 style={{ fontSize:20, fontWeight:500, textAlign:'center', marginBottom:4 }}>{studioName || 'אולפן מוסיקה'}</h1>
+        <p style={{ fontSize:13, color:'var(--color-text-secondary)', textAlign:'center', marginBottom:20 }}>טופס הרשמה לתלמיד חדש</p>
+        {err && <div style={{ background:'var(--color-background-danger)', color:'var(--color-text-danger)', fontSize:13, padding:'9px 12px', borderRadius:'var(--border-radius-md)', marginBottom:12 }}>{err}</div>}
+        <div style={{ background:'var(--color-background-primary)', borderRadius:'var(--border-radius-lg)', padding:'16px 14px', border:'0.5px solid var(--color-border-tertiary)' }}>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4 }}>שם מלא *</div>
+            <input style={{ width:'100%', fontSize:14, padding:'8px 10px', borderRadius:'var(--border-radius-md)', border:'0.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)', boxSizing:'border-box' }}
+              value={name} onChange={e=>setName(e.target.value)} placeholder="שם פרטי ומשפחה" autoFocus />
+          </div>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4 }}>טלפון *</div>
+            <input type="tel" style={{ width:'100%', fontSize:14, padding:'8px 10px', borderRadius:'var(--border-radius-md)', border:'0.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)', boxSizing:'border-box' }}
+              value={phone} onChange={e=>setPhone(e.target.value)} placeholder="050-0000000" />
+          </div>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4 }}>שם הורה / אפוטרופוס</div>
+            <input style={{ width:'100%', fontSize:14, padding:'8px 10px', borderRadius:'var(--border-radius-md)', border:'0.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)', boxSizing:'border-box' }}
+              value={parent} onChange={e=>setParent(e.target.value)} placeholder="אופציונלי" />
+          </div>
+          <div style={{ marginBottom:12 }}>
+            <label style={{ display:'flex', alignItems:'center', gap:10, cursor:'pointer', padding:'10px 12px', borderRadius:'var(--border-radius-md)', border:`1px solid ${hasPref?'var(--color-text-primary)':'var(--color-border-tertiary)'}`, background:hasPref?'var(--color-background-secondary)':'transparent' }}>
+              <input type="checkbox" checked={hasPref} onChange={e=>setHasPref(e.target.checked)} style={{ width:16, height:16, margin:0 }} />
+              <div>
+                <div style={{ fontSize:13, fontWeight:500 }}>יש לי שעה מועדפת</div>
+                <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginTop:2 }}>אציין יום ושעה — המורה יקבע את הסוג</div>
+              </div>
+            </label>
+          </div>
+          {hasPref && (
+            <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4 }}>יום מועדף</div>
+                <select style={{ width:'100%', fontSize:14, padding:'8px 10px', borderRadius:'var(--border-radius-md)', border:'0.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)' }}
+                  value={di} onChange={e=>setDi(Number(e.target.value))}>
+                  {[0,1,2,3,4].map(d=><option key={d} value={d}>יום {DAY_HE[d]}</option>)}
+                </select>
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4 }}>שעה מועדפת</div>
+                <input type="time" step="900" style={{ width:'100%', fontSize:14, padding:'8px 10px', borderRadius:'var(--border-radius-md)', border:'0.5px solid var(--color-border-secondary)', background:'var(--color-background-primary)', color:'var(--color-text-primary)' }}
+                  value={time} onChange={e=>setTime(e.target.value)} />
+              </div>
+            </div>
+          )}
+          <button
+            style={{ width:'100%', padding:'10px', fontSize:14, fontWeight:500, borderRadius:'var(--border-radius-md)', cursor: (name.trim()&&phone.trim()&&!busy)?'pointer':'not-allowed', border:'none', background: (name.trim()&&phone.trim()&&!busy)?'var(--color-text-primary)':'var(--color-background-secondary)', color: (name.trim()&&phone.trim()&&!busy)?'var(--color-background-primary)':'var(--color-text-secondary)', marginTop:4 }}
+            disabled={!name.trim()||!phone.trim()||busy} onClick={submit}>
+            {busy ? 'שולח...' : 'שלח בקשת הרשמה'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+// Teachers authenticate against Firebase Auth — no shared secret lives in this
+// file. Students present their personal code, which is normally carried in the
+// link they were sent; typing it is only the fallback.
+function LoginView({ onTeacher, onStudent }) {
+  const [mode,  setMode]  = useState(null);
+  const [email, setEmail] = useState('');
+  const [pass,  setPass]  = useState('');
+  const [code,  setCode]  = useState('');
+  const [err,   setErr]   = useState('');
+  const [busy,  setBusy]  = useState(false);
+
+  async function submitTeacher() {
+    if (!email.trim() || !pass) return;
+    setBusy(true); setErr('');
+    const msg = await onTeacher(email.trim(), pass);
+    if (msg) setErr(msg);
+    setBusy(false);
+  }
+
+  async function submitStudent() {
+    if (!code.trim()) return;
+    setBusy(true); setErr('');
+    const msg = await onStudent(code.trim().toUpperCase());
+    if (msg) setErr(msg);
+    setBusy(false);
+  }
+
+  function back() { setMode(null); setErr(''); setPass(''); setCode(''); }
+
+  return (
+    <div style={{ ...S.page, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:22, padding:16 }}>
+      <div style={{ fontSize:54, lineHeight:1, textAlign:'center' }}>🎸</div>
+      <h1 style={{ fontSize:23, fontWeight:700, margin:0, color:'#185FA5', textAlign:'center' }}>מערכת תיאום שיעורים</h1>
+
+      {!mode && (
+        <div style={{ display:'flex', flexDirection:'column', gap:12, width:'100%', maxWidth:300 }}>
+          <button style={{ ...S.btn('primary'), width:'100%', padding:'13px', fontSize:15 }} onClick={() => setMode('teacher')}>כניסת מורה</button>
+          <button style={{ ...S.btn('default'), width:'100%', padding:'13px', fontSize:15 }} onClick={() => setMode('student')}>כניסת תלמיד</button>
+        </div>
+      )}
+
+      {mode === 'teacher' && (
+        <div style={{ ...S.card, width:'100%', maxWidth:320 }}>
+          <div style={S.label}>אימייל</div>
+          <input style={{ ...S.input, marginBottom:10, direction:'ltr', textAlign:'left' }} type="email"
+            autoComplete="username" value={email} onChange={e => setEmail(e.target.value)}
+            onKeyDown={e => e.key==='Enter' && submitTeacher()} autoFocus />
+          <div style={S.label}>סיסמה</div>
+          <input style={{ ...S.input, direction:'ltr', textAlign:'left' }} type="password"
+            autoComplete="current-password" value={pass} onChange={e => setPass(e.target.value)}
+            onKeyDown={e => e.key==='Enter' && submitTeacher()} />
+          {err && <p style={{ color:'var(--color-text-danger)', fontSize:13, margin:'10px 0 0' }}>{err}</p>}
+          <div style={{ ...S.row, marginTop:14, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={back}>חזרה</button>
+            <button style={S.btn('primary')} disabled={busy} onClick={submitTeacher}>
+              {busy ? 'מתחבר...' : 'כניסה'}
+            </button>
+          </div>
+          <p style={{ fontSize:11, color:'var(--color-text-secondary)', textAlign:'center', margin:'12px 0 0' }}>
+            חשבון מורה נפתח על ידי מנהל המערכת
+          </p>
+        </div>
+      )}
+
+      {mode === 'student' && (
+        <div style={{ ...S.card, width:'100%', maxWidth:320 }}>
+          <div style={S.label}>הקוד האישי שלך</div>
+          <input style={{ ...S.input, textAlign:'center', letterSpacing:'0.3em', fontSize:22,
+                          fontWeight:600, textTransform:'uppercase', padding:'12px' }}
+            placeholder="XXXXXX" maxLength={8} value={code}
+            onChange={e => setCode(e.target.value.toUpperCase())}
+            onKeyDown={e => e.key==='Enter' && submitStudent()} autoFocus />
+          {err && <p style={{ color:'var(--color-text-danger)', fontSize:13, margin:'10px 0 0' }}>{err}</p>}
+          <div style={{ ...S.row, marginTop:14, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={back}>חזרה</button>
+            <button style={S.btn('primary')} disabled={busy} onClick={submitStudent}>
+              {busy ? 'בודק...' : 'כניסה'}
+            </button>
+          </div>
+          <p style={{ fontSize:11, color:'var(--color-text-secondary)', textAlign:'center', margin:'12px 0 0' }}>
+            קיבלת קישור מהמורה? פתח אותו והמכשיר יזכור אותך
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEACHER VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function TeacherView({ ctx }) {
+  const [tab, setTab] = useState('week');
+  const { lessons, logout } = ctx;
+  const pendingCount = lessons.filter(l => l.status === 'pending_cancel').length + (ctx.pendingStudents?.length || 0);
+
+  return (
+    <div style={S.page}>
+      <div style={S.header}>
+        <h1 style={S.title}>ממשק מורה</h1>
+        <button style={S.btn('ghost')} onClick={logout}>יציאה</button>
+      </div>
+      <div style={S.tabs}>
+        {['week','nextweek','students','requests'].map(t => (
+          <button key={t} style={S.tab(tab===t)} onClick={() => setTab(t)}>
+            {t==='week'?'השבוע':t==='nextweek'?'שבוע הבא':t==='students'?'תלמידים':`בקשות${pendingCount>0?` (${pendingCount})`:''}`}
+          </button>
+        ))}
+      </div>
+      <div style={S.body}>
+        {tab==='week'     && <TeacherWeekTab ctx={ctx} />}
+        {tab==='nextweek' && <TeacherNextWeekTab ctx={ctx} />}
+        {tab==='students' && <TeacherStudentsTab ctx={ctx} />}
+        {tab==='requests' && <TeacherRequestsTab ctx={ctx} />}
+      </div>
+    </div>
+  );
+}
+
+// ── Teacher: This Week ────────────────────────────────────────────────────────
+function TeacherWeekTab({ ctx }) {
+  const { lessons, students, TODAY, THIS_WK } = ctx;
+  const [selected, setSelected] = useState(null);
+
+  const teachingDays = useMemo(() => {
+    const dates = [...new Set(lessons.filter(l => inWk(l.date, THIS_WK)).map(l => l.date))].sort();
+    return dates.map(date => ({ date, di: parseD(date).getDay() }));
+  }, [lessons, THIS_WK]);
+
+  const weekLessons = useMemo(() => lessons.filter(l => inWk(l.date, THIS_WK)), [lessons, THIS_WK]);
+
+  if (teachingDays.length === 0) return (
+    <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>אין שיעורים מתוכננים השבוע</div>
+  );
+
+  function renderItem(lesson, top, height) {
+    const stu = students.find(s => s.id === lesson.sid);
+    const isPending = lesson.status === 'pending_cancel';
+    const isCancelled = ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show','moved'].includes(lesson.status);
+    const bg = isPending?'#fef3c7':isCancelled?'#f1f5f9':'#dbeafe';
+    const fg = isPending?'#92400e':isCancelled?'#94a3b8':'#1e40af';
+    const border = isPending?'#fcd34d':isCancelled?'#cbd5e1':'#93c5fd';
+    return (
+      <div key={lesson.id} onClick={e => { e.stopPropagation(); setSelected(lesson); }} style={{
+        position:'absolute', top, left:2, right:2, height,
+        background:bg, border:`1px solid ${border}`, borderRadius:5,
+        padding:'3px 5px', cursor:'pointer', overflow:'hidden', opacity:isCancelled?0.55:1,
+      }}>
+        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{stu?.name}</div>
+        <div style={{ fontSize:10, color:fg }}>{lesson.time}</div>
+        {isPending && <div style={{ fontSize:9, color:fg }}>⏳</div>}
+      </div>
+    );
+  }
+
+  const selStu = selected ? students.find(s => s.id === selected.sid) : null;
+  return (
+    <div>
+      <WeekCalendar days={teachingDays} items={weekLessons} renderItem={renderItem} />
+      {selected && (
+        <Modal onClose={() => setSelected(null)}>
+          <div style={{ fontSize:17, fontWeight:600, marginBottom:6, direction:'rtl' }}>{selStu?.name}</div>
+          <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:14, direction:'rtl' }}>
+            יום {DAY_HE[parseD(selected.date).getDay()]} · {dd(selected.date)} · {selected.time}
+          </div>
+          <StatusBadge status={selected.status} />
+          {selected.reason && <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'10px 0 0', direction:'rtl' }}>סיבה: {selected.reason}</p>}
+          {selected.status === 'pending_cancel' && (
+            <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginTop:12, direction:'rtl' }}>
+              <div style={{ fontSize:13, color:'var(--color-text-warning)' }}>בקשת ביטול ממתינה — עבור ללשונית <strong>בקשות</strong></div>
+            </div>
+          )}
+          <button style={{ ...S.btn('ghost'), marginTop:18, width:'100%' }} onClick={() => setSelected(null)}>סגור</button>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── Teacher: Next Week ────────────────────────────────────────────────────────
+// ALL weekdays (0-4, Sun-Thu) always visible for easy extra-slot adding.
+// Tap empty area → pre-filled extra slot modal.
+// Block/remove options for ALL slot types including empty slots.
+function TeacherNextWeekTab({ ctx }) {
+  const { students, lessons, NEXT_WK, pubNext, updLesson, pubWeek, baseSlots, addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek, fixOrphanedSlot } = ctx;
+  const [cancelledIds, setCancelledIds] = useState(pubNext?.cancelledIds || []);
+  const [blockedSlots, setBlockedSlots] = useState(pubNext?.blockedSlots || []);
+  const [extraSlots, setExtraSlots]     = useState(pubNext?.extraSlots   || []);
+  const [note, setNote]                 = useState(pubNext?.note         || '');
+  const [wasPublished, setWasPublished] = useState(!!pubNext);
+  const [addingSlot,     setAddingSlot]     = useState(false);
+  const [addingOpenSlot, setAddingOpenSlot] = useState(false);
+  const [resetConfirm,   setResetConfirm]   = useState(false);
+  const [movingSlot,    setMovingSlot]    = useState(null); // {di, t, sid}
+  const [moveToDi,      setMoveToDi]      = useState(1);
+  const [moveToT,       setMoveToT]       = useState('09:00');
+  const [newSlotDi, setNewSlotDi]       = useState(1);
+  const [newSlotT, setNewSlotT]         = useState('13:00');
+  const [selected, setSelected]         = useState(null);
+
+  // Always show Sunday(0) → Thursday(4), plus any extra-slot days
+  const teachingDays = useMemo(() => {
+    const diSet = new Set([0, 1, 2, 3, 4, ...extraSlots.map(s => s.di)]);
+    return [...diSet].sort().map(di => {
+      let d = parseD(NEXT_WK);
+      while (d.getDay() !== di) d.setDate(d.getDate() + 1);
+      return { date: fmtD(d), di };
+    });
+  }, [NEXT_WK, extraSlots]);
+
+  // Build calendar items: base slots + extra slots
+  const calItems = useMemo(() => {
+    const items = [];
+    const used = new Set();
+
+    baseSlots.forEach(slot => {
+      let d = parseD(NEXT_WK);
+      while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
+      const date = fmtD(d);
+      const key = `${date}_${slot.t}`;
+      if (used.has(key)) return;
+      used.add(key);
+      const isBlocked  = blockedSlots.some(b => b.di===slot.di && b.t===slot.t);
+      const isCancelled= slot.sid ? cancelledIds.includes(slot.sid) : false;
+      const fixedStu   = slot.sid ? students.find(s => s.id===slot.sid) : null;
+      const lesson     = lessons.find(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status));
+      const bookedStu  = lesson ? students.find(s => s.id===lesson.sid) : null;
+      const flexStu    = bookedStu && bookedStu.id !== (slot.sid || '') ? bookedStu : null;
+      const isOrphaned = !!(slot.sid && !fixedStu);
+      const isPermOpen = !slot.sid || isOrphaned;  // orphaned slots treated as open
+      items.push({ id:key, date, time:slot.t, di:slot.di, lesson, fixedStu, flexStu, isCancelled, isBlocked, isExtra:false, isPermOpen, isOrphaned, isEmpty:!fixedStu&&!lesson&&!isBlocked&&!isOrphaned });
+    });
+
+    extraSlots.forEach(slot => {
+      let d = parseD(NEXT_WK);
+      while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
+      const date = fmtD(d);
+      const key = `extra_${date}_${slot.t}`;
+      if (used.has(key)) return;
+      used.add(key);
+      const lesson   = lessons.find(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status));
+      const bookedStu= lesson ? students.find(s => s.id===lesson.sid) : null;
+      items.push({ id:key, date, time:slot.t, di:slot.di, lesson, fixedStu:null, flexStu:bookedStu||null, isCancelled:false, isBlocked:false, isExtra:true, isEmpty:!lesson });
+    });
+
+    // Also show lessons that exist in Firestore but have no matching baseSlot or extraSlot
+    // (e.g. one-time lessons added after the slot was deleted from baseSlots)
+    lessons.forEach(lesson => {
+      if (!['scheduled','pending_cancel'].includes(lesson.status)) return;
+      if (!inWk(lesson.date, NEXT_WK)) return;
+      const key = `${lesson.date}_${lesson.time}`;
+      const extraKey = `extra_${lesson.date}_${lesson.time}`;
+      if (used.has(key) || used.has(extraKey)) return;
+      if (!isValidTime(lesson.time)) return;
+      const bookedStu = students.find(s => s.id === lesson.sid);
+      if (!bookedStu) return; // ghost lesson, skip
+      const ld = parseD(lesson.date);
+      const di = ld.getDay();
+      used.add(key);
+      items.push({ id:key, date:lesson.date, time:lesson.time, di, lesson, fixedStu:null, flexStu:bookedStu, isCancelled:false, isBlocked:false, isExtra:true, isPermOpen:false, isOrphaned:false, isEmpty:false });
+    });
+
+    return items;
+  }, [NEXT_WK, lessons, students, cancelledIds, blockedSlots, extraSlots, baseSlots]);
+
+  function renderItem(item, top, height) {
+    const showBlocked    = item.isBlocked;
+    const showFixed      = item.fixedStu && !item.isCancelled && !item.isBlocked && !item.flexStu;
+    const showFlex       = !!item.flexStu && !item.isBlocked;
+    const showCancelled  = item.fixedStu && item.isCancelled && !item.flexStu && !item.isBlocked;
+    const showExtraEmpty = item.isExtra && item.isEmpty && !item.isBlocked;
+    let bg,fg,border,label;
+    const showPermOpen = item.isPermOpen && !item.isOrphaned && !item.flexStu && !item.isBlocked;
+    const showOrphaned = item.isOrphaned && !item.isBlocked;
+    if (showBlocked)     { bg='#fee2e2'; fg='#991b1b'; border='#fca5a5'; label='🚫 חסום'; }
+    else if (showFixed)      { bg='#dbeafe'; fg='#1e40af'; border='#93c5fd'; label=item.fixedStu.name; }
+    else if (showFlex)       { bg='#dcfce7'; fg='#166534'; border='#86efac'; label=item.flexStu.name; }
+    else if (showCancelled)  { bg='#f1f5f9'; fg='#94a3b8'; border='#cbd5e1'; label=`${item.fixedStu.name} (הוסר)`; }
+    else if (showExtraEmpty) { bg='#fef9c3'; fg='#78350f'; border='#fde68a'; label='⭐ חריגה'; }
+    else if (showOrphaned)   { bg='#ffedd5'; fg='#9a3412'; border='#fed7aa'; label='⚠️ שעה עם תלמיד שנמחק'; }
+    else if (showPermOpen)   { bg='#ccfbf1'; fg='#0f766e'; border='#5eead4'; label='🔓 פנוי קבוע'; }
+    else                     { bg='#f8fafc'; fg='#cbd5e1'; border='#e2e8f0'; label='פנוי'; }
+    return (
+      <div key={item.id} onClick={e => { e.stopPropagation(); setSelected(item); }} style={{
+        position:'absolute', top, left:2, right:2, height,
+        background:bg, border:`1px solid ${border}`, borderRadius:5,
+        padding:'3px 5px', cursor:'pointer', overflow:'hidden',
+        opacity:(showCancelled||showBlocked)?0.55:1,
+      }}>
+        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
+        <div style={{ fontSize:10, color:fg }}>{item.time}</div>
+      </div>
+    );
+  }
+
+  function handleColumnClick(di, date, timeStr) {
+    setNewSlotDi(di); setNewSlotT(timeStr); setAddingSlot(true);
+  }
+
+  function handleAction(action) {
+    if (!selected) return;
+    if (action === 'block_slot') {
+      setBlockedSlots(bs => [...bs.filter(b => !(b.di===selected.di&&b.t===selected.time)), { di:selected.di, t:selected.time }]);
+      if (selected.fixedStu) setCancelledIds(ids => ids.includes(selected.fixedStu.id) ? ids : [...ids, selected.fixedStu.id]);
+    } else if (action === 'remove_student') {
+      if (selected.fixedStu) setCancelledIds(ids => [...ids, selected.fixedStu.id]);
+    } else if (action === 'restore_fixed') {
+      setCancelledIds(ids => ids.filter(id => id !== selected.fixedStu?.id));
+      setBlockedSlots(bs => bs.filter(b => !(b.di===selected.di&&b.t===selected.time)));
+    } else if (action === 'unblock_slot') {
+      setBlockedSlots(bs => bs.filter(b => !(b.di===selected.di&&b.t===selected.time)));
+    } else if (action === 'remove_flex') {
+      if (selected.lesson) updLesson(selected.lesson.id, { status:'teacher_cancelled' });
+    } else if (action === 'remove_extra') {
+      setExtraSlots(es => es.filter(e => !(e.di===selected.di&&e.t===selected.time)));
+    } else if (action === 'delete_permanent') {
+      removeBaseSlot(selected.di, selected.time);
+    } else if (action === 'fix_orphaned') {
+      ctx.fixOrphanedSlot(selected.di, selected.time);
+    }
+    setSelected(null);
+  }
+
+  function doPublish() {
+    pubWeek(NEXT_WK, cancelledIds, blockedSlots, extraSlots, note);
+    setWasPublished(true);
+  }
+
+  function addExtraSlot() {
+    if (!isValidTime(newSlotT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
+    if (!extraSlots.find(e => e.di===newSlotDi && e.t===newSlotT)) {
+      setExtraSlots(es => [...es, { di:newSlotDi, t:newSlotT }]);
+    }
+    setAddingSlot(false);
+  }
+
+  const dayOptions = [0,1,2,3,4,5].map(di => ({ value:di, label:`יום ${DAY_HE[di]}` }));
+
+  // End-time helper
+  function endTime(t) {
+    const [h,m] = t.split(':').map(Number);
+    const e = h*60+m+45;
+    return `${String(Math.floor(e/60)).padStart(2,'0')}:${String(e%60).padStart(2,'0')}`;
+  }
+
+  return (
+    <div>
+      {/* Publish bar */}
+      <div style={{ ...S.card, border:'1.5px solid #B5D4F4', background:'#f8fbff', marginBottom:10 }}>
+        <div style={{ ...S.row, justifyContent:'space-between', marginBottom:8 }}>
+          <span style={{ fontSize:13, fontWeight:600, color:'#185FA5' }}>
+            שבוע {dd(NEXT_WK)} – {dd(addDays(NEXT_WK,6))}
+            {wasPublished && <span style={{ ...S.badge('success'), marginRight:8 }}>פורסם ✓</span>}
+          </span>
+        </div>
+        <div style={S.label}>הערה לתלמידים (אופציונלי)</div>
+        <textarea style={{ ...S.input, minHeight:48, resize:'vertical', marginBottom:10 }}
+          placeholder="למשל: ביום שלישי אני זמין גם בערב..."
+          value={note} onChange={e => setNote(e.target.value)} />
+        <div style={{ ...S.row, justifyContent:'space-between' }}>
+          {/* Prominent "+ שעה חריגה" button */}
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+            <button style={{ ...S.btn('info'), display:'flex', alignItems:'center', gap:6, fontWeight:600 }} onClick={() => setAddingSlot(true)}>
+              ＋ שעה חריגה
+            </button>
+            <button style={{ ...S.btn('success'), display:'flex', alignItems:'center', gap:6, fontWeight:600, background:'#ccfbf1', color:'#0f766e', borderColor:'#5eead4' }} onClick={() => setAddingOpenSlot(true)}>
+              ＋ שעה פנויה קבועה
+            </button>
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <button style={{ ...S.btn('ghost'), padding:'6px 14px', fontSize:13, color:'#dc2626', border:'1.5px solid #fca5a5' }}
+              onClick={() => setResetConfirm(true)}>🗑 נקה הכל</button>
+            <button style={S.btn('primary')} onClick={doPublish}>
+              {wasPublished ? 'עדכן פרסום' : 'פרסם לתלמידים'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div style={{ ...S.row, gap:8, marginBottom:8, flexWrap:'wrap' }}>
+        {[['#dbeafe','#1e40af','קבוע'],['#dcfce7','#166534','נרשם'],['#ccfbf1','#0f766e','פנוי קבוע (כל שבוע)'],['#f8fafc','#cbd5e1','פנוי'],['#f1f5f9','#94a3b8','הוסר'],['#fee2e2','#991b1b','חסום'],['#fef9c3','#78350f','חריגה'],['#ffedd5','#9a3412','⚠️ תלמיד שנמחק']].map(([bg,fg,l]) => (
+          <div key={l} style={{ ...S.row, gap:3 }}>
+            <div style={{ width:9, height:9, borderRadius:2, background:bg, border:`1px solid ${fg}`, flexShrink:0 }} />
+            <span style={{ fontSize:10, color:'var(--color-text-secondary)' }}>{l}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, textAlign:'center' }}>
+        לחץ על שעה קיימת לפעולות · לחץ על שטח ריק להוספת שעה חריגה
+      </div>
+
+
+      {/* ── Hidden / out-of-hours base slots warning ── */}
+      {baseSlots.filter(s => !isValidTime(s.t)).length > 0 && (
+        <div style={{ ...S.card, background:'#fff7ed', border:'1.5px solid #fed7aa', marginBottom:10 }}>
+          <div style={{ fontSize:13, fontWeight:600, color:'#9a3412', marginBottom:8 }}>
+            ⚠️ שעות חסויות מחוץ לשעות הפעילות
+          </div>
+          <div style={{ fontSize:12, color:'#9a3412', marginBottom:10 }}>
+            השעות הבאות אינן מוצגות בלוח (לפני 07:00 או אחרי 21:00) אך גלויות לתלמידים. מחק אותן:
+          </div>
+          {baseSlots.filter(s => !isValidTime(s.t)).map(s => (
+            <div key={`${s.di}_${s.t}`} style={{ ...S.row, justifyContent:'space-between', marginBottom:6, background:'#ffedd5', borderRadius:6, padding:'6px 10px' }}>
+              <span style={{ fontSize:13, color:'#7c2d12' }}>
+                יום {DAY_HE[s.di]} · {s.t}
+                {s.sid ? ` · ${students.find(st=>st.id===s.sid)?.name||s.sid}` : ' · פנוי'}
+              </span>
+              <button style={{ ...S.btn('danger'), padding:'3px 10px', fontSize:12 }}
+                onClick={() => removeBaseSlot(s.di, s.t)}>
+                🗑 מחק
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <WeekCalendar days={teachingDays} items={calItems} renderItem={renderItem} onColumnClick={handleColumnClick} />
+
+
+
+      {/* ── Slot action modal ── */}
+      {selected && (
+        <Modal onClose={() => setSelected(null)}>
+          <div style={{ fontSize:15, fontWeight:600, marginBottom:4, direction:'rtl' }}>
+            יום {DAY_HE[selected.di]} · {selected.time}
+          </div>
+
+          {selected.isBlocked && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>השעה חסומה — אף תלמיד לא יכול לתפוס אותה</p>
+              <button style={{ ...S.btn('success'), width:'100%', marginBottom:8 }} onClick={() => handleAction('unblock_slot')}>בטל חסימה</button>
+            </>
+          )}
+
+          {/* Fixed student, active */}
+          {selected.fixedStu && !selected.isCancelled && !selected.isBlocked && !selected.flexStu && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 10px', direction:'rtl' }}>שיעור קבוע: <strong>{selected.fixedStu.name}</strong></p>
+              <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'10px 12px', marginBottom:10, direction:'rtl' }}>
+                <button style={{ ...S.btn('info'), width:'100%', marginBottom:8, textAlign:'right' }} onClick={() => { setMovingSlot({di:selected.di, t:selected.time, sid:selected.fixedStu.id}); setMoveToDi(selected.di); setMoveToT(selected.time); setSelected(null); }}>
+                  <div style={{ fontWeight:600 }}>✏️ שנה שעה לצמיתות</div>
+                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>יחול מהשבוע הבא ואילך על {selected.fixedStu.name}</div>
+                </button>
+                <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8, textAlign:'right' }} onClick={() => handleAction('block_slot')}>
+                  <div style={{ fontWeight:600 }}>🚫 חסום שבוע הבא בלבד</div>
+                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>אף תלמיד לא יוכל לתפוס את השעה הזו</div>
+                </button>
+                <button style={{ ...S.btn('warning'), width:'100%', marginBottom:8, textAlign:'right' }} onClick={() => handleAction('remove_student')}>
+                  <div style={{ fontWeight:600 }}>הסר תלמיד לשבוע הבא</div>
+                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>השעה תישאר פתוחה לתלמיד נייד</div>
+                </button>
+                <button style={{ ...S.btn('danger'), width:'100%', textAlign:'right' }} onClick={() => handleAction('delete_permanent')}>
+                  <div style={{ fontWeight:600 }}>🗑 בטל שיעור קבוע לצמיתות</div>
+                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>מבטל את כל השיעורים העתידיים של {selected.fixedStu.name} בשעה זו</div>
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Fixed student, removed */}
+          {selected.fixedStu && selected.isCancelled && !selected.isBlocked && !selected.flexStu && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>
+                <strong>{selected.fixedStu.name}</strong> — הוסר · השעה פתוחה לאחרים
+              </p>
+              <button style={{ ...S.btn('success'), width:'100%', marginBottom:8 }} onClick={() => handleAction('restore_fixed')}>שחזר תלמיד לשעה</button>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('block_slot')}>🚫 חסום שעה לחלוטין</button>
+            </>
+          )}
+
+          {/* Flex student booked */}
+          {selected.flexStu && !selected.isBlocked && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>
+                נרשם: <strong>{selected.flexStu.name}</strong>
+                {selected.fixedStu && <span style={{ color:'#94a3b8' }}> (הקבוע הוסר)</span>}
+              </p>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('remove_flex')}>הסר מהשעה</button>
+            </>
+          )}
+
+          {/* Extra empty slot */}
+          {selected.isExtra && selected.isEmpty && !selected.isBlocked && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>שעה חריגה — פנויה</p>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('remove_extra')}>🗑 הסר שעה חריגה</button>
+            </>
+          )}
+
+          {/* Orphaned slot — sid points to deleted student */}
+          {selected.isOrphaned && !selected.isBlocked && (
+            <>
+              <div style={{ background:'#fff7ed', borderRadius:8, padding:'10px 12px', marginBottom:10, direction:'rtl' }}>
+                <div style={{ fontSize:13, fontWeight:600, color:'#9a3412', marginBottom:4 }}>⚠️ שעה עם תלמיד שנמחק</div>
+                <div style={{ fontSize:12, color:'#9a3412' }}>השעה הזו שייכת לתלמיד שכבר לא קיים במערכת. יש להחליט מה לעשות:</div>
+              </div>
+              <button style={{ ...S.btn('success'), width:'100%', marginBottom:8, textAlign:'right' }}
+                onClick={() => handleAction('fix_orphaned')}>
+                <div style={{ fontWeight:600 }}>🔓 הפוך לשעה פנויה קבועה</div>
+                <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תופיע בלוח כל שבוע לתלמידים ניידים</div>
+              </button>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8, textAlign:'right' }}
+                onClick={() => handleAction('delete_permanent')}>
+                <div style={{ fontWeight:600 }}>🗑 מחק שעה לצמיתות</div>
+                <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תיעלם מהלוח לחלוטין</div>
+              </button>
+            </>
+          )}
+
+          {/* Open slot (no student) */}
+          {selected.isPermOpen && !selected.isOrphaned && !selected.flexStu && !selected.isBlocked && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>שעה פנויה קבועה — מופיעה כל שבוע</p>
+              <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => { setMovingSlot({di:selected.di, t:selected.time, sid:null}); setMoveToDi(selected.di); setMoveToT(selected.time); setSelected(null); }}>✏️ שנה שעה/יום לצמיתות</button>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('block_slot')}>🚫 חסום השבוע הבא בלבד</button>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('delete_permanent')}>🗑 מחק שעה לצמיתות</button>
+            </>
+          )}
+
+
+
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setSelected(null)}>סגור</button>
+        </Modal>
+      )}
+
+      {/* ── Reset confirmation modal ── */}
+      {resetConfirm && (
+        <Modal onClose={() => setResetConfirm(false)}>
+          <h3 style={{ margin:'0 0 12px', fontSize:16, fontWeight:600, direction:'rtl', color:'#dc2626' }}>⚠️ איפוס שבוע הבא</h3>
+          <p style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl', lineHeight:1.6 }}>
+            פעולה זו תאפס את שבוע הבא בלבד:<br/>
+            • <strong>שעות חריגות</strong> — יוסרו<br/>
+            • <strong>חסימות וביטולי תלמידים</strong> — יבוטלו<br/>
+            • <strong>הפרסום לתלמידים</strong> — יבוטל<br/>
+            <span style={{ fontSize:11, opacity:0.7 }}>המשבצות הפנויות הקבועות לא ייפגעו</span>
+          </p>
+          <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
+            onClick={() => {
+              setExtraSlots([]);
+              setBlockedSlots([]);
+              setCancelledIds([]);
+              setNote('');
+              setWasPublished(false);
+              clearPublishedWeek(NEXT_WK);
+              setResetConfirm(false);
+            }}>
+            🗑 כן, אפס שבוע הבא
+          </button>
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setResetConfirm(false)}>ביטול</button>
+        </Modal>
+      )}
+
+      {/* ── Edit / move slot modal ── */}
+      {movingSlot && (
+        <Modal onClose={() => setMovingSlot(null)}>
+          <h3 style={{ margin:'0 0 6px', fontSize:16, fontWeight:600, direction:'rtl' }}>✏️ שינוי שעה קבועה</h3>
+          <p style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:4, direction:'rtl' }}>
+            {DAY_HE[movingSlot.di]} · {movingSlot.t}
+            {movingSlot.sid && <span style={{ color:'var(--color-text-info)', fontWeight:600 }}> · {students.find(s=>s.id===movingSlot.sid)?.name}</span>}
+          </p>
+          {movingSlot.sid && (
+            <div style={{ background:'var(--color-background-info)', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'var(--color-text-info)', direction:'rtl' }}>
+              שיעורי התלמיד יועברו לשעה החדשה מהשבוע הבא ואילך
+            </div>
+          )}
+          <div style={{ marginBottom:12 }}>
+            <div style={S.label}>יום חדש</div>
+            <select style={S.input} value={moveToDi} onChange={e => setMoveToDi(Number(e.target.value))}>
+              {dayOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom:16 }}>
+            <div style={S.label}>שעה חדשה</div>
+            <input type="time" step="300" style={S.input} value={moveToT} onChange={e => setMoveToT(e.target.value)} />
+          </div>
+          <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
+            שיעור: {moveToT} – {endTime(moveToT)} (45 דקות)
+          </div>
+          <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }}
+            onClick={() => {
+              if (!isValidTime(moveToT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
+              moveBaseSlot(movingSlot.di, movingSlot.t, moveToDi, moveToT);
+              setMovingSlot(null);
+            }}>
+            ✅ שמור שינוי
+          </button>
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setMovingSlot(null)}>ביטול</button>
+        </Modal>
+      )}
+
+      {/* ── Add permanent open slot modal ── */}
+      {addingOpenSlot && (
+        <Modal onClose={() => setAddingOpenSlot(false)}>
+          <h3 style={{ margin:'0 0 16px', fontSize:16, fontWeight:500, direction:'rtl' }}>הוסף שעה פנויה קבועה</h3>
+          <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 14px', direction:'rtl' }}>
+            השעה תופיע בלוח כל שבוע כשעה פתוחה לתלמידים ניידים.
+          </p>
+          <div style={{ marginBottom:12 }}>
+            <div style={S.label}>יום</div>
+            <select style={S.input} value={newSlotDi} onChange={e => setNewSlotDi(Number(e.target.value))}>
+              {dayOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom:8 }}>
+            <div style={S.label}>שעת התחלה</div>
+            <input type="time" step="300" style={S.input} value={newSlotT} onChange={e => setNewSlotT(e.target.value)} />
+          </div>
+          <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
+            שיעור: {newSlotT} – {endTime(newSlotT)} (45 דקות)
+          </div>
+          <div style={{ ...S.row, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={() => setAddingOpenSlot(false)}>ביטול</button>
+            <button style={{ ...S.btn('success'), background:'#ccfbf1', color:'#0f766e', borderColor:'#5eead4' }}
+              onClick={() => {
+                if (!isValidTime(newSlotT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
+                addBaseSlot(newSlotDi, newSlotT, null); setAddingOpenSlot(false);
+              }}>
+              🔓 הוסף שעה קבועה
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Add exceptional slot modal ── */}
+      {addingSlot && (
+        <Modal onClose={() => setAddingSlot(false)}>
+          <h3 style={{ margin:'0 0 16px', fontSize:16, fontWeight:500, direction:'rtl' }}>הוסף שעה חריגה</h3>
+          <div style={{ marginBottom:12 }}>
+            <div style={S.label}>יום</div>
+            <select style={S.input} value={newSlotDi} onChange={e => setNewSlotDi(Number(e.target.value))}>
+              {dayOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom:8 }}>
+            <div style={S.label}>שעת התחלה (צעדים של 5 דקות)</div>
+            <input type="time" step="300" style={S.input} value={newSlotT} onChange={e => setNewSlotT(e.target.value)} />
+          </div>
+          <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
+            שיעור: {newSlotT} – {endTime(newSlotT)} (45 דקות)
+          </div>
+          <div style={{ ...S.row, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={() => setAddingSlot(false)}>ביטול</button>
+            <button style={S.btn('primary')} onClick={addExtraSlot}>הוסף שעה</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── Second lesson slot manager ───────────────────────────────────────────────
+function SecondSlotManager({ stu, assignSecondSlot, removeSecondSlot }) {
+  const [editing, setEditing] = useState(false);
+  const [di, setDi]           = useState(stu.secondSlot?.di ?? 1);
+  const [t,  setT]            = useState(stu.secondSlot?.t  ?? '10:00');
+  const hasSecond = !!stu.secondSlot;
+  return (
+    <div style={{ ...S.card, marginTop:10 }}>
+      <div style={{ ...S.row, justifyContent:'space-between', marginBottom:(hasSecond||editing)?8:0 }}>
+        <span style={{ fontSize:13, fontWeight:500 }}>שיעור שני שבועי</span>
+        {!editing && (
+          <button style={{ ...S.btn(hasSecond?'warning':'success'), padding:'4px 12px', fontSize:12 }}
+            onClick={() => { setDi(stu.secondSlot?.di??1); setT(stu.secondSlot?.t??'10:00'); setEditing(true); }}>
+            {hasSecond ? '✒ שנה' : '＋ הוסף שיעור שני'}
+          </button>
+        )}
+      </div>
+      {hasSecond && !editing && (
+        <div style={{ ...S.row, justifyContent:'space-between' }}>
+          <span style={{ fontSize:13, color:'var(--color-text-secondary)' }}>יום {DAY_HE[stu.secondSlot.di]} · {stu.secondSlot.t}</span>
+          <button style={{ ...S.btn('danger'), padding:'4px 10px', fontSize:12 }}
+            onClick={() => { if(window.confirm('להסיר את השיעור השני?')) removeSecondSlot(stu.id); }}>
+            הסר
+          </button>
+        </div>
+      )}
+      {editing && (
+        <div>
+          <div style={{ ...S.row, gap:8, marginBottom:10 }}>
+            <div style={{ flex:1 }}>
+              <div style={S.label}>יום</div>
+              <select style={S.input} value={di} onChange={e=>setDi(Number(e.target.value))}>
+                {[0,1,2,3,4].map(d=><option key={d} value={d}>יום {DAY_HE[d]}</option>)}
+              </select>
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={S.label}>שעה</div>
+              <input type='time' step='900' style={S.input} value={t} onChange={e=>setT(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ ...S.row, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={()=>setEditing(false)}>ביטול</button>
+            <button style={S.btn('primary')} onClick={() => { assignSecondSlot(stu.id, { di, t }); setEditing(false); }}>שמור</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── One-time extra lesson adder ───────────────────────────────────────────────
+function OneTimeLessonAdder({ sid, addLesson, lessons, students, THIS_WK, NEXT_WK, pubNext, baseSlots }) {
+  const [open,     setOpen]     = useState(false);
+  const [weekView, setWeekView] = useState('this');
+
+  const thisWkSlots = React.useMemo(() => {
+    return baseSlots
+      .filter(slot => isValidTime(slot.t) && (slot.sid === null || !students.some(s => s.id === slot.sid)))
+      .map(slot => {
+        let d = parseD(THIS_WK);
+        while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
+        const date = fmtD(d);
+        if (hoursUntil(date, slot.t) <= 0) return null;
+        const taken = lessons.some(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status) && students.some(s => s.id===l.sid));
+        return taken ? null : { date, time:slot.t, di:slot.di };
+      }).filter(Boolean)
+      .sort((a,b) => a.di!==b.di ? a.di-b.di : a.time.localeCompare(b.time));
+  }, [lessons, students, THIS_WK, baseSlots]);
+
+  const nextWkSlots = React.useMemo(() => {
+    if (!pubNext) return [];
+    const available = [
+      ...baseSlots
+        .filter(slot => isValidTime(slot.t) && (slot.sid===null || pubNext.cancelledIds?.includes(slot.sid) || !students.some(s => s.id===slot.sid)))
+        .filter(slot => !pubNext.blockedSlots?.some(b => b.di===slot.di && b.t===slot.t)),
+      ...(pubNext.extraSlots||[])
+        .filter(s => isValidTime(s.t))
+        .map(s => ({ di:s.di, t:s.t, sid:null }))
+        .filter(slot => !pubNext.blockedSlots?.some(b => b.di===slot.di && b.t===slot.t)),
+    ];
+    return available.map(slot => {
+      let d = parseD(NEXT_WK);
+      while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
+      const date = fmtD(d);
+      const taken = lessons.some(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status) && students.some(s => s.id===l.sid));
+      return taken ? null : { date, time:slot.t, di:slot.di };
+    }).filter(Boolean)
+      .sort((a,b) => a.di!==b.di ? a.di-b.di : a.time.localeCompare(b.time));
+  }, [pubNext, lessons, NEXT_WK, baseSlots]);
+
+  function book(slot) {
+    addLesson(sid, slot.date, slot.time);
+    setOpen(false);
+  }
+
+  const activeSlots = weekView === 'this' ? thisWkSlots : nextWkSlots;
+
+  return (
+    <div style={{ ...S.card, marginTop:10 }}>
+      <div style={{ ...S.row, justifyContent:'space-between', marginBottom: open ? 8 : 0 }}>
+        <span style={{ fontSize:13, fontWeight:500 }}>שיעור חד-פעמי</span>
+        {!open && (
+          <button style={{ ...S.btn('info'), padding:'4px 12px', fontSize:12 }}
+            onClick={() => { setWeekView('this'); setOpen(true); }}>
+            ＋ הוסף שיעור חד-פעמי
+          </button>
+        )}
+      </div>
+      {open && (
+        <div>
+          {/* Week toggle */}
+          <div style={{ ...S.row, gap:0, marginBottom:10, background:'var(--color-background-secondary)', borderRadius:8, padding:3 }}>
+            {[['this', `השבוע · ${dd(THIS_WK)}`], ['next', `שבוע הבא · ${dd(NEXT_WK)}`]].map(([key, label]) => {
+              const disabled = key === 'next' && !pubNext;
+              return (
+                <button key={key} style={{
+                  flex:1, padding:'6px 0', fontSize:12, fontWeight:500, borderRadius:6, border:'none',
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  background: weekView===key ? 'var(--color-background-primary)' : 'transparent',
+                  color: weekView===key ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+                  opacity: disabled ? 0.45 : 1,
+                  boxShadow: weekView===key ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                }} onClick={() => { if (!disabled) setWeekView(key); }}>
+                  {label}{disabled ? ' (לא פורסם)' : ''}
+                </button>
+              );
+            })}
+          </div>
+
+          {activeSlots.length === 0 ? (
+            <div style={{ fontSize:13, color:'var(--color-text-secondary)', textAlign:'center', padding:'10px 0' }}>
+              אין שעות פנויות
+            </div>
+          ) : (
+            activeSlots.map(sl => (
+              <button key={`${sl.date}_${sl.time}`}
+                style={{ ...S.btn('default'), marginBottom:6, width:'100%', textAlign:'right' }}
+                onClick={() => book(sl)}>
+                יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+              </button>
+            ))
+          )}
+
+          <button style={{ ...S.btn('ghost'), width:'100%', marginTop:4 }} onClick={() => setOpen(false)}>ביטול</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Add a student directly ───────────────────────────────────────────────────
+// Registration links are for new enquiries; a teacher setting up her studio
+// needs to enter the students she already teaches without filling in the
+// public form on their behalf.
+function AddStudentModal({ onClose, onSave }) {
+  const [name,   setName]   = useState('');
+  const [phone,  setPhone]  = useState('');
+  const [parent, setParent] = useState('');
+  const [type,   setType]   = useState('fixed');
+  const [di,     setDi]     = useState(0);
+  const [t,      setT]      = useState('14:00');
+
+  const ok = name.trim().length > 1 && (type === 'flexible' || isValidTime(t));
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 style={{ margin:'0 0 14px', fontSize:16, fontWeight:600, direction:'rtl' }}>הוספת תלמיד</h3>
+
+      <div style={S.label}>שם התלמיד *</div>
+      <input style={{ ...S.input, marginBottom:10 }} value={name} autoFocus
+        onChange={e => setName(e.target.value)} placeholder="שם פרטי ומשפחה" />
+
+      <div style={S.label}>טלפון</div>
+      <input style={{ ...S.input, marginBottom:10 }} type="tel" value={phone}
+        onChange={e => setPhone(e.target.value)} placeholder="050-0000000" />
+
+      <div style={S.label}>שם הורה</div>
+      <input style={{ ...S.input, marginBottom:14 }} value={parent}
+        onChange={e => setParent(e.target.value)} placeholder="אופציונלי" />
+
+      <div style={S.label}>סוג תלמיד</div>
+      <div style={{ display:'flex', gap:6, marginBottom:12 }}>
+        {[['fixed','קבוע — שעה אחת כל שבוע'],['flexible','נייד — נרשם כל שבוע מחדש']].map(([v,l]) => (
+          <button key={v} style={{ ...S.btn(type===v?'primary':'default'), flex:1, fontSize:12, padding:'8px 6px' }}
+            onClick={() => setType(v)}>{l}</button>
+        ))}
+      </div>
+
+      {type === 'fixed' && (
+        <div style={{ display:'flex', gap:8, marginBottom:14 }}>
+          <div style={{ flex:1 }}>
+            <div style={S.label}>יום</div>
+            <select style={S.input} value={di} onChange={e => setDi(Number(e.target.value))}>
+              {[0,1,2,3,4,5].map(d => <option key={d} value={d}>יום {DAY_HE[d]}</option>)}
+            </select>
+          </div>
+          <div style={{ flex:1 }}>
+            <div style={S.label}>שעה</div>
+            <input type="time" step="300" style={S.input} value={t} onChange={e => setT(e.target.value)} />
+          </div>
+        </div>
+      )}
+
+      <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8, opacity: ok ? 1 : 0.45 }}
+        disabled={!ok}
+        onClick={() => onSave({ name, phone, parent, type, di: type==='fixed'?di:null, t: type==='fixed'?t:null })}>
+        ✅ הוסף וצור קוד אישי
+      </button>
+      <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={onClose}>ביטול</button>
+    </Modal>
+  );
+}
+
+// ── Teacher: Students ─────────────────────────────────────────────────────────
+function TeacherStudentsTab({ ctx }) {
+  const { students, lessons, TODAY, THIS_WK, NEXT_WK, pubNext, baseSlots, deleteStudent, addLesson, addBaseSlot, updLesson, changeToFixed, changeToFlexible } = ctx;
+  const [selected, setSelected] = useState(null);
+  const [deletePrompt, setDeletePrompt] = useState(false);
+  const [typeModal, setTypeModal]     = useState(false);   // convert type modal
+  const [fixDi, setFixDi]             = useState(1);
+  const [fixT, setFixT]               = useState('09:00');
+  const [keepSlot, setKeepSlot]       = useState(true);    // when converting to flexible
+  const [keepSlotModal, setKeepSlotModal] = useState(false);
+  const [moveLessonModal, setMoveLessonModal] = useState(null); // lesson being moved
+  const [moveSlots, setMoveSlots]     = useState([]);
+  const [cancelLessonId, setCancelLessonId] = useState(null);
+  const [addModal, setAddModal] = useState(false);
+
+  function getStats(sid) {
+    const my = lessons.filter(l => l.sid === sid);
+    const happened   = my.filter(l => l.status==='cancelled_unjustified'||l.status==='no_show'||l.status==='completed'||(l.status==='scheduled'&&l.date<TODAY)).length;
+    const justified  = my.filter(l => l.status==='cancelled_justified').length;
+    const unjustified= my.filter(l => l.status==='cancelled_unjustified').length;
+    const upcoming   = my.filter(l => l.status==='scheduled'&&l.date>=TODAY).length;
+    const pending    = my.filter(l => l.status==='pending_cancel').length;
+    return { happened, justified, unjustified, upcoming, pending };
+  }
+
+  function getOpenSlotsForTeacher(lesson) {
+    const slots = [];
+    const allBase = baseSlots.filter(s => isValidTime(s.t) && (s.sid===null || !students.some(st => st.id===s.sid && st.id !== lesson.sid)));
+    // This week
+    allBase.forEach(s => {
+      let d = parseD(THIS_WK);
+      while (d.getDay()!==s.di) d.setDate(d.getDate()+1);
+      const date = fmtD(d);
+      if (date < TODAY) return;
+      if (date===lesson.date && s.t===lesson.time) return;
+      const taken = lessons.some(l => l.date===date && l.time===s.t && ['scheduled','pending_cancel'].includes(l.status) && l.sid!==lesson.sid && students.some(st => st.id===l.sid));
+      if (!taken) slots.push({ date, time:s.t, di:s.di, week:'this' });
+    });
+    // Next week (if published)
+    if (pubNext) {
+      const nwBase = [
+        ...baseSlots.filter(s => isValidTime(s.t) && (s.sid===null || pubNext.cancelledIds?.includes(s.sid)))
+          .filter(s => !pubNext.blockedSlots?.some(b => b.di===s.di && b.t===s.t)),
+        ...(pubNext.extraSlots||[]).filter(s => isValidTime(s.t))
+          .filter(s => !pubNext.blockedSlots?.some(b => b.di===s.di && b.t===s.t))
+          .map(s => ({ di:s.di, t:s.t, sid:null })),
+      ];
+      nwBase.forEach(s => {
+        let d = parseD(NEXT_WK);
+        while (d.getDay()!==s.di) d.setDate(d.getDate()+1);
+        const date = fmtD(d);
+        if (date===lesson.date && s.t===lesson.time) return;
+        const taken = lessons.some(l => l.date===date && l.time===s.t && ['scheduled','pending_cancel'].includes(l.status) && l.sid!==lesson.sid && students.some(st => st.id===l.sid));
+        if (!taken) slots.push({ date, time:s.t, di:s.di, week:'next' });
+      });
+    }
+    return slots.sort((a,b) => a.date!==b.date ? a.date.localeCompare(b.date) : a.time.localeCompare(b.time));
+  }
+
+  if (selected) {
+    const stu = students.find(s => s.id === selected);
+    const stats = getStats(selected);
+    const history = lessons.filter(l => l.sid===selected && !['scheduled','pending_cancel'].includes(l.status))
+      .sort((a,b) => b.date.localeCompare(a.date)).slice(0,20);
+    const progress = Math.round((stats.happened/32)*100);
+    return (
+      <div>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+          <button style={{ ...S.btn('ghost'), padding:'6px 0' }} onClick={() => setSelected(null)}>← חזרה לרשימה</button>
+          <button style={{ ...S.btn('danger'), padding:'5px 12px', fontSize:12 }}
+            onClick={() => setDeletePrompt(true)}>
+            🗑 מחק תלמיד
+          </button>
+        </div>
+        <div style={S.card}>
+          <div style={{ fontSize:18, fontWeight:500, marginBottom:4 }}>{stu.name}</div>
+          <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:12 }}>{stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}</div>
+          <div style={{ fontSize:13, marginBottom:8 }}><span style={{ fontWeight:500 }}>{stats.happened}</span> / 32 שיעורים שהתקיימו</div>
+          <div style={{ height:8, background:'var(--color-background-secondary)', borderRadius:4, marginBottom:12, overflow:'hidden' }}>
+            <div style={{ height:'100%', width:`${Math.min(progress,100)}%`, background:progress>=100?'var(--color-text-success)':'var(--color-text-info)', borderRadius:4 }} />
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+            {[['התקיימו',stats.happened,'success'],['ממתינים',stats.upcoming,'info'],['מוצדקים',stats.justified,'warning'],['לא מוצדקים',stats.unjustified,'danger']].map(([label,val,color]) => (
+              <div key={label} style={{ background:`var(--color-background-${color})`, borderRadius:'var(--border-radius-md)', padding:'8px 10px' }}>
+                <div style={{ fontSize:11, color:`var(--color-text-${color})` }}>{label}</div>
+                <div style={{ fontSize:20, fontWeight:500, color:`var(--color-text-${color})` }}>{val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <OneTimeLessonAdder sid={selected} addLesson={addLesson} lessons={lessons} students={students} THIS_WK={THIS_WK} NEXT_WK={NEXT_WK} pubNext={pubNext} baseSlots={baseSlots} />
+
+        {/* ── Type management ── */}
+        <div style={{ ...S.card, marginTop:10 }}>
+          <div style={{ ...S.row, justifyContent:'space-between', marginBottom:4 }}>
+            <span style={{ fontSize:13, fontWeight:500 }}>סוג תלמיד</span>
+            <span style={{ ...S.badge(stu.type==='fixed'?'info':'success') }}>
+              {stu.type==='fixed' ? `קבוע · יום ${DAY_HE[stu.di]} · ${stu.t}` : 'נייד'}
+            </span>
+          </div>
+          {stu.type==='flexible' && (
+            <button style={{ ...S.btn('info'), width:'100%', marginTop:6, fontSize:12 }}
+              onClick={() => { setFixDi(1); setFixT('09:00'); setTypeModal(true); }}>
+              🔒 הפוך לתלמיד קבוע
+            </button>
+          )}
+          {stu.type==='fixed' && (
+            <button style={{ ...S.btn('warning'), width:'100%', marginTop:6, fontSize:12 }}
+              onClick={() => setKeepSlotModal(true)}>
+              🔓 הפוך לתלמיד נייד
+            </button>
+          )}
+        </div>
+
+        {/* ── Upcoming lessons (teacher actions) ── */}
+        {(() => {
+          const upcomingLessons = (() => {
+            const all = lessons
+              .filter(l => l.sid===selected && l.status==='scheduled' && l.date>=TODAY)
+              .sort((a,b)=>a.date.localeCompare(b.date));
+            if (stu.type==='fixed') {
+              // For fixed students, show only this week + next week
+              return all.filter(l => l.date < addDays(NEXT_WK, 7));
+            }
+            return all.slice(0, 8);
+          })();
+          if (upcomingLessons.length===0) return null;
+          return (
+            <div style={{ marginTop:10 }}>
+              <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'6px 0 6px' }}>שיעורים קרובים</div>
+              {upcomingLessons.map(l => (
+                <div key={l.id} style={{ ...S.card, display:'flex', justifyContent:'space-between', alignItems:'center', padding:'8px 12px' }}>
+                  <div style={{ fontSize:13 }}>
+                    יום {DAY_HE[parseD(l.date).getDay()]} {dd(l.date)} · {l.time}
+                  </div>
+                  <div style={{ ...S.row, gap:6 }}>
+                    <button style={{ ...S.btn('info'), padding:'4px 10px', fontSize:11 }}
+                      onClick={() => { setMoveSlots(getOpenSlotsForTeacher(l)); setMoveLessonModal(l); }}>
+                      העבר
+                    </button>
+                    <button style={{ ...S.btn('danger'), padding:'4px 10px', fontSize:11 }}
+                      onClick={() => setCancelLessonId(l.id)}>
+                      בטל
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+        <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'12px 0 6px' }}>היסטוריה</div>
+        {history.map(l => (
+          <div key={l.id} style={{ ...S.card, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <div>
+              <div style={{ fontSize:13, marginBottom:2 }}>{dd(l.date)} · {l.time}</div>
+              {l.reason && <div style={{ fontSize:12, color:'var(--color-text-secondary)' }}>{l.reason}</div>}
+              <HolBadge date={l.date} />
+            </div>
+            <StatusBadge status={l.status} />
+          </div>
+        ))}
+
+      {/* Convert to fixed modal */}
+      {typeModal && (
+        <Modal onClose={() => setTypeModal(false)}>
+          <h3 style={{ margin:'0 0 14px', fontSize:16, fontWeight:600, direction:'rtl' }}>🔒 הפוך לתלמיד קבוע</h3>
+          <div style={{ marginBottom:12 }}>
+            <div style={S.label}>יום קבוע</div>
+            <select style={S.input} value={fixDi} onChange={e => setFixDi(Number(e.target.value))}>
+              {[0,1,2,3,4].map(d => <option key={d} value={d}>יום {DAY_HE[d]}</option>)}
+            </select>
+          </div>
+          <div style={{ marginBottom:16 }}>
+            <div style={S.label}>שעה קבועה</div>
+            <input type="time" step="900" style={S.input} value={fixT} onChange={e => setFixT(e.target.value)} />
+          </div>
+          <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }}
+            onClick={() => {
+              if (!isValidTime(fixT)) { alert('שעה לא תקינה'); return; }
+              changeToFixed(selected, fixDi, fixT);
+              setTypeModal(false);
+            }}>
+            ✅ שמור שינוי
+          </button>
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setTypeModal(false)}>ביטול</button>
+        </Modal>
+      )}
+
+      {/* Convert to flexible – keep slot? modal */}
+      {keepSlotModal && (
+        <Modal onClose={() => setKeepSlotModal(false)}>
+          <h3 style={{ margin:'0 0 10px', fontSize:16, fontWeight:600, direction:'rtl' }}>🔓 הפוך לתלמיד נייד</h3>
+          <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 16px', direction:'rtl' }}>
+            מה לעשות עם המשבצת הקבועה של {students.find(s=>s.id===selected)?.name}?
+          </p>
+          <button style={{ ...S.btn('success'), width:'100%', marginBottom:8, textAlign:'right' }}
+            onClick={() => { changeToFlexible(selected, true); setKeepSlotModal(false); }}>
+            <div style={{ fontWeight:600 }}>🔓 הפוך למשבצת פנויה קבועה</div>
+            <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תישאר בלוח לתלמידים ניידים</div>
+          </button>
+          <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8, textAlign:'right' }}
+            onClick={() => { changeToFlexible(selected, false); setKeepSlotModal(false); }}>
+            <div style={{ fontWeight:600 }}>🗑 הסר את המשבצת לחלוטין</div>
+            <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תיעלם מהלוח</div>
+          </button>
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setKeepSlotModal(false)}>ביטול</button>
+        </Modal>
+      )}
+
+      {/* Cancel lesson confirmation */}
+      {cancelLessonId && (
+        <Modal onClose={() => setCancelLessonId(null)}>
+          <h3 style={{ margin:'0 0 12px', fontSize:16, fontWeight:600, direction:'rtl', color:'#dc2626' }}>ביטול שיעור</h3>
+          <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 16px', direction:'rtl' }}>
+            לבטל את השיעור? פעולה זו תסומן כ"בוטל ע"י המורה".
+          </p>
+          <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
+            onClick={() => { updLesson(cancelLessonId, { status:'teacher_cancelled' }); setCancelLessonId(null); }}>
+            ✅ כן, בטל שיעור
+          </button>
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setCancelLessonId(null)}>חזרה</button>
+        </Modal>
+      )}
+
+      {/* Move lesson modal */}
+      {moveLessonModal && (
+        <Modal onClose={() => setMoveLessonModal(null)}>
+          <h3 style={{ margin:'0 0 6px', fontSize:16, fontWeight:500, direction:'rtl' }}>העברת שיעור</h3>
+          <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'8px 12px', marginBottom:14, direction:'rtl' }}>
+            <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:2 }}>שיעור נוכחי</div>
+            <div style={{ fontSize:14, fontWeight:500 }}>יום {DAY_HE[parseD(moveLessonModal.date).getDay()]} {dd(moveLessonModal.date)} · {moveLessonModal.time}</div>
+          </div>
+          {moveSlots.length === 0 ? (
+            <div style={{ fontSize:13, color:'var(--color-text-secondary)', textAlign:'center', padding:'10px 0' }}>אין שעות פנויות זמינות</div>
+          ) : (
+            <>
+              {['this','next'].map(wk => {
+                const wkSlots = moveSlots.filter(s => s.week===wk);
+                if (!wkSlots.length) return null;
+                return (
+                  <div key={wk} style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, fontWeight:600, color:'var(--color-text-secondary)', marginBottom:6, direction:'rtl' }}>
+                      {wk==='this' ? 'השבוע' : 'שבוע הבא'}
+                    </div>
+                    {wkSlots.map(sl => (
+                      <button key={`${sl.date}_${sl.time}`}
+                        style={{ ...S.btn('default'), marginBottom:5, width:'100%', textAlign:'right' }}
+                        onClick={() => {
+                          updLesson(moveLessonModal.id, { status:'moved' });
+                          addLesson(moveLessonModal.sid, sl.date, sl.time);
+                          setMoveLessonModal(null);
+                        }}>
+                        יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </>
+          )}
+          <button style={{ ...S.btn('ghost'), width:'100%', marginTop:4 }} onClick={() => setMoveLessonModal(null)}>ביטול</button>
+        </Modal>
+      )}
+
+      {deletePrompt && (
+        <Modal onClose={() => setDeletePrompt(false)}>
+          <div style={{ fontSize:16, fontWeight:700, marginBottom:8, direction:'rtl' }}>מחיקת {stu.name}</div>
+          {stu.type==='fixed' && stu.di!=null && stu.t ? (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 16px', direction:'rtl' }}>
+                מה לעשות עם המשבצת הקבועה?<br/>
+                <strong>יום {DAY_HE[stu.di]} · {stu.t}</strong>
+              </p>
+              <button style={{ ...S.btn('success'), width:'100%', marginBottom:10, textAlign:'right' }}
+                onClick={() => { addBaseSlot(stu.di, stu.t, null); deleteStudent(selected); setDeletePrompt(false); setSelected(null); }}>
+                <div style={{ fontWeight:700 }}>🔓 הפוך למשבצת פנויה קבועה</div>
+                <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תישאר בלוח כל שבוע, פתוחה לתלמידים ניידים</div>
+              </button>
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:10, textAlign:'right' }}
+                onClick={() => { deleteStudent(selected); setDeletePrompt(false); setSelected(null); }}>
+                <div style={{ fontWeight:700 }}>🗑 מחק את המשבצת לצמיתות</div>
+                <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תיעלם מהלוח לחלוטין</div>
+              </button>
+            </>
+          ) : (
+            <button style={{ ...S.btn('danger'), width:'100%', marginBottom:10 }}
+              onClick={() => { deleteStudent(selected); setDeletePrompt(false); setSelected(null); }}>
+              🗑 מחק תלמיד
+            </button>
+          )}
+          <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setDeletePrompt(false)}>ביטול</button>
+        </Modal>
+      )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button style={{ ...S.btn('primary'), width:'100%', padding:'11px', marginBottom:4 }}
+        onClick={() => setAddModal(true)}>
+        ＋ הוסף תלמיד
+      </button>
+      {addModal && <AddStudentModal onClose={() => setAddModal(false)}
+                                    onSave={d => { ctx.addStudent(d); setAddModal(false); }} />}
+      {students.length === 0 && (
+        <div style={{ ...S.card, textAlign:'center', marginTop:10 }}>
+          <div style={{ fontSize:32, marginBottom:8 }}>🎸</div>
+          <div style={{ fontSize:14, fontWeight:500, marginBottom:4 }}>עדיין אין תלמידים</div>
+          <div style={{ fontSize:12, color:'var(--color-text-secondary)', lineHeight:1.6 }}>
+            הוסף אותם בעצמך עם הכפתור למעלה, או שלח להם קישור הרשמה
+            והם יופיעו בלשונית "בקשות" לאישור.
+          </div>
+        </div>
+      )}
+      {['fixed','flexible'].map(type => (
+        <div key={type}>
+          {students.filter(s => s.type===type).length > 0 && (
+          <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'10px 0 6px' }}>
+            {type==='fixed'?'תלמידים קבועים':'תלמידים ניידים'}
+          </div>)}
+          {students.filter(s => s.type===type).map(s => {
+            const stats = getStats(s.id);
+            const pct = Math.min(Math.round(stats.happened/32*100),100);
+            return (
+              <button key={s.id} style={{ ...S.card, width:'100%', textAlign:'right', cursor:'pointer', display:'block' }} onClick={() => setSelected(s.id)}>
+                <div style={{ ...S.row, justifyContent:'space-between', marginBottom:6 }}>
+                  <span style={{ fontSize:14, fontWeight:500 }}>{s.name}</span>
+                  <span style={{ fontSize:13, color:'var(--color-text-secondary)' }}>{stats.happened}/32</span>
+                </div>
+                <div style={{ height:5, background:'var(--color-background-secondary)', borderRadius:3, overflow:'hidden' }}>
+                  <div style={{ height:'100%', width:`${pct}%`, background:pct>=100?'#27500A':'#378ADD', borderRadius:3 }} />
+                </div>
+                {stats.pending>0 && <span style={{ ...S.badge('warning'), marginTop:6 }}>ממתין לביטול</span>}
+              </button>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Approved student: hand over the personal link ────────────────────────────
+// The teacher never dictates the code over the phone — she sends a link that
+// carries it, and the student's device remembers it from then on.
+function ApprovedCodeModal({ info, onClose }) {
+  const [copied, setCopied] = useState('');
+  const link = `${location.origin}${location.pathname}#s/${info.code}`;
+  const msg  = `היי! נרשמת לשיעורי גיטרה 🎸\nזה הקישור האישי שלך למערכת — שמור אותו:\n${link}`;
+
+  async function copy(text, which) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(which);
+      setTimeout(() => setCopied(''), 2500);
+    } catch (e) { setCopied('fail'); }
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ textAlign:'center', padding:'4px 0', direction:'rtl' }}>
+        <div style={{ fontSize:38, marginBottom:10 }}>✅</div>
+        <div style={{ fontSize:17, fontWeight:600, marginBottom:14 }}>{info.name} אושר/ה!</div>
+
+        <div style={{ background:'var(--color-background-secondary)', borderRadius:12, padding:'14px', marginBottom:14 }}>
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:4 }}>קוד אישי</div>
+          <div style={{ fontSize:32, fontWeight:700, letterSpacing:6, color:'var(--color-text-primary)', direction:'ltr' }}>{info.code}</div>
+        </div>
+
+        <div style={{ background:'var(--color-background-info)', borderRadius:10, padding:'10px 12px', marginBottom:14, textAlign:'right' }}>
+          <div style={{ fontSize:12, color:'var(--color-text-info)', fontWeight:600, marginBottom:4 }}>שלח את זה בוואטסאפ</div>
+          <div style={{ fontSize:11, color:'var(--color-text-info)', lineHeight:1.5 }}>
+            לחיצה אחת על הקישור והמכשיר של התלמיד יזכור אותו — הוא לא יצטרך להקליד כלום שוב.
+          </div>
+        </div>
+
+        <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => copy(msg, 'msg')}>
+          {copied === 'msg' ? '✓ ההודעה הועתקה' : '📋 העתק הודעה מוכנה'}
+        </button>
+        <button style={{ ...S.btn('info'), width:'100%', marginBottom:8 }} onClick={() => copy(link, 'link')}>
+          {copied === 'link' ? '✓ הקישור הועתק' : '🔗 העתק קישור בלבד'}
+        </button>
+        {copied === 'fail' && (
+          <div style={{ fontSize:11, color:'var(--color-text-danger)', marginBottom:8, direction:'ltr', wordBreak:'break-all' }}>{link}</div>
+        )}
+        <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={onClose}>סגור</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Teacher: Cancellation Requests + Pending Registrations ──────────────────
+function TeacherRequestsTab({ ctx }) {
+  const { lessons, students, updLesson, pendingStudents, approveStudent, rejectStudent, approvedInfo, clearApprovedInfo, pubNext, NEXT_WK, inWk: _inWk } = ctx;
+  const [approvingId, setApprovingId] = useState(null);
+  const [assignType,  setAssignType]  = useState('flexible');
+  const [assignDi,    setAssignDi]    = useState(1);
+  const [assignT,     setAssignT]     = useState('09:00');
+
+  const pendingCancel = lessons.filter(l => l.status==='pending_cancel').sort((a,b) => a.date.localeCompare(b.date));
+  const unregisteredFlex = pubNext ? students.filter(s => {
+    if (s.status === 'deleted') return false;
+    const hasLesson = lessons.some(l => l.sid===s.id && inWk(l.date, NEXT_WK) && ['scheduled','pending_cancel'].includes(l.status));
+    if (hasLesson) return false;
+    if (s.type === 'flexible') return true;
+    // fixed student cancelled or blocked for next week — needs to rebook
+    if (s.type === 'fixed') {
+      const inCancelled = pubNext.cancelledIds?.includes(s.id);
+      const slotBlocked = s.di != null && s.t && pubNext.blockedSlots?.some(b => b.di === s.di && b.t === s.t);
+      if (inCancelled || slotBlocked) return true;
+    }
+    return false;
+  }) : [];
+  const pendingStu    = pendingStudents || [];
+
+  if (pendingCancel.length===0 && pendingStu.length===0 && !approvedInfo && unregisteredFlex.length===0) return (
+    <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>אין בקשות ממתינות</div>
+  );
+
+  return (
+    <div>
+      {/* ── Approved code modal ── */}
+      {approvedInfo && <ApprovedCodeModal info={approvedInfo} onClose={clearApprovedInfo} />}
+
+      {/* ── Pending registrations ── */}
+      {pendingStu.length > 0 && (
+        <>
+          <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'6px 0 8px' }}>
+            תלמידים חדשים ממתינים לאישור ({pendingStu.length})
+          </div>
+          {pendingStu.map(ps => (
+            <div key={ps.id} style={S.card}>
+              <div style={{ ...S.row, justifyContent:'space-between', marginBottom:4 }}>
+                <span style={{ fontSize:15, fontWeight:500 }}>{ps.name}</span>
+                <span style={{ ...S.badge('info') }}>הרשמה חדשה</span>
+              </div>
+              <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:2 }}>📱 {ps.phone}{ps.parent ? ` · הורה: ${ps.parent}` : ''}</div>
+              <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:10 }}>
+                מבקש: {ps.type==='fixed' ? `קבוע — יום ${DAY_HE[ps.di]} ${ps.t}` : 'נייד'}
+              </div>
+
+              {approvingId === ps.id ? (
+                <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'12px 10px' }}>
+                  <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:8 }}>סוג תלמיד לאישור:</div>
+                  <div style={{ display:'flex', gap:6, marginBottom:10 }}>
+                    {[['flexible','נייד'],['fixed','קבוע']].map(([v,l]) => (
+                      <button key={v} style={{ ...S.btn(assignType===v?'primary':'default'), flex:1, padding:'6px 8px', fontSize:13 }}
+                        onClick={() => setAssignType(v)}>{l}</button>
+                    ))}
+                  </div>
+                  {assignType==='fixed' && (
+                    <div style={{ display:'flex', gap:8, marginBottom:10 }}>
+                      <div style={{ flex:1 }}>
+                        <div style={S.label}>יום</div>
+                        <select style={S.input} value={assignDi} onChange={e=>setAssignDi(Number(e.target.value))}>
+                          {[0,1,2,3,4].map(d=><option key={d} value={d}>יום {DAY_HE[d]}</option>)}
+                        </select>
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <div style={S.label}>שעה</div>
+                        <input type="time" step="900" style={S.input} value={assignT} onChange={e=>setAssignT(e.target.value)} />
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display:'flex', gap:8 }}>
+                    <button style={S.btn('ghost')} onClick={() => setApprovingId(null)}>ביטול</button>
+                    <button style={{ ...S.btn('success'), flex:1 }} onClick={() => {
+                      approveStudent(ps.id, ps, assignType, assignType==='fixed'?assignDi:null, assignType==='fixed'?assignT:null);
+                      setApprovingId(null);
+                    }}>✓ אשר תלמיד</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display:'flex', gap:8 }}>
+                  <button style={{ ...S.btn('danger'), flex:1 }} onClick={() => rejectStudent(ps.id)}>דחה</button>
+                  <button style={{ ...S.btn('success'), flex:1 }} onClick={() => {
+                    setApprovingId(ps.id);
+                    setAssignType(ps.type || 'flexible');
+                    if (ps.di != null) setAssignDi(ps.di);
+                    if (ps.t) setAssignT(ps.t);
+                  }}>אשר</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* ── Unregistered flexible students ── */}
+      {unregisteredFlex.length > 0 && (
+        <div style={{ ...S.card, background:'#fff7ed', border:'1.5px solid #fed7aa', marginBottom:10 }}>
+          <div style={{ fontSize:13, fontWeight:600, color:'#9a3412', marginBottom:6 }}>
+            📋 תלמידים שטרם נרשמו לשבוע הבא ({unregisteredFlex.length})
+          </div>
+          <div style={{ fontSize:12, color:'#9a3412', marginBottom:8 }}>
+            שבוע {dd(NEXT_WK)} – {dd(addDays(NEXT_WK, 6))}
+          </div>
+          {unregisteredFlex.map(s => (
+            <div key={s.id} style={{ ...S.row, justifyContent:'space-between', padding:'4px 0', borderBottom:'0.5px solid #fed7aa' }}>
+              <span style={{ fontSize:13, color:'#7c2d12', fontWeight:500 }}>{s.name}</span>
+              {s.phone && <span style={{ fontSize:12, color:'#9a3412' }}>📱 {s.phone}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Pending cancellations ── */}
+      {pendingCancel.length > 0 && (
+        <>
+          <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'14px 0 8px' }}>בקשות ביטול</div>
+          {pendingCancel.map(l => {
+            const stu = students.find(s => s.id===l.sid);
+            return (
+              <div key={l.id} style={S.card}>
+                <div style={{ ...S.row, marginBottom:4 }}>
+                  <span style={{ fontSize:15, fontWeight:500 }}>{stu?.name}</span>
+                  <span style={{ fontSize:13, color:'var(--color-text-secondary)' }}>{dd(l.date)} · {l.time}</span>
+                  {l.lateCancel && <span style={{ ...S.badge('danger'), fontSize:10 }}>ביטול מאוחר</span>}
+                  <HolBadge date={l.date} />
+                </div>
+                <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'4px 0 12px' }}>סיבה: {l.reason||'—'}</p>
+                <div style={{ ...S.row, gap:8 }}>
+                  <button style={{ ...S.btn('success'), flex:1 }} onClick={() => updLesson(l.id,{status:'cancelled_justified'})}>מוצדק — יקבל השלמה</button>
+                  <button style={{ ...S.btn('danger'), flex:1 }} onClick={() => updLesson(l.id,{status:'cancelled_unjustified'})}>לא מוצדק — נחשב כשיעור</button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STUDENT VIEW
+// ─────────────────────────────────────────────────────────────────────────────
+function StudentView({ ctx }) {
+  const [tab, setTab] = useState('mine');
+  const { me, logout } = ctx;
+  return (
+    <div style={S.page}>
+      <div style={S.header}>
+        <h1 style={S.title}>{me.name}</h1>
+        <button style={S.btn('ghost')} onClick={logout}>יציאה</button>
+      </div>
+      <div style={S.tabs}>
+        <button style={S.tab(tab==='mine')}  onClick={() => setTab('mine')}>השיעורים שלי</button>
+        <button style={S.tab(tab==='board')} onClick={() => setTab('board')}>לוח הכיתה</button>
+      </div>
+      <div style={S.body}>
+        {tab==='mine'  && <StudentMineTab  ctx={ctx} />}
+        {tab==='board' && <StudentBoardTab ctx={ctx} />}
+      </div>
+    </div>
+  );
+}
+
+// ── Student: helpers over the published board ────────────────────────────────
+// A student never receives the student list or the teacher's slot→code map.
+// Everything they see comes from one published board document per week plus a
+// live "claims" map that records which slots have been taken since publishing.
+function claimKey(di, t) { return `${di}_${t}`; }
+
+// Neither the board nor the claims map may carry a student code — the code is
+// the login secret, so publishing it to every reader would hand the whole
+// studio away. Display names only; "is this mine?" is answered from the
+// viewer's own lessons, which only they can read.
+function boardSlotsFor(weekStart, board, claims) {
+  if (!board || !Array.isArray(board.slots)) return [];
+  const cl = claims || {};
+  return board.slots
+    .filter(s => isValidTime(s.t))
+    .map(s => {
+      const claim = cl[claimKey(s.di, s.t)] || null;
+      const state = s.state === 'blocked' ? 'blocked' : (claim || s.state === 'taken' ? 'taken' : 'free');
+      return {
+        di: s.di, t: s.t, date: dateOfDi(weekStart, s.di), state,
+        name: claim ? claim.name : (s.name || null),
+      };
+    });
+}
+
+function freeSlotsFor(weekStart, board, claims, { after } = {}) {
+  return boardSlotsFor(weekStart, board, claims)
+    .filter(s => s.state === 'free')
+    .filter(s => !after || hoursUntil(s.date, s.t) >= after)
+    .map(s => ({ date:s.date, time:s.t, di:s.di }))
+    .sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
+}
+
+// ── Student: My schedule ──────────────────────────────────────────────────────
+function StudentMineTab({ ctx }) {
+  const { me, lessons, TODAY, THIS_WK, NEXT_WK, boards, claims, pubNext, updLesson, addLesson } = ctx;
+  const [cancelModal, setCancelModal] = useState(null);
+  const [moveModal, setMoveModal]     = useState(null);
+  const [moveSuccess, setMoveSuccess] = useState(null);
+  const [reason, setReason]           = useState('');
+
+  const myLessons = useMemo(() =>
+    lessons.filter(l => l.sid === me.id).sort((a,b) => a.date.localeCompare(b.date)),
+    [lessons, me.id]
+  );
+
+  const upcoming = myLessons.filter(l => l.status==='scheduled' && l.date>=TODAY);
+  const history  = myLessons.filter(l => !['scheduled','pending_cancel'].includes(l.status))
+                            .sort((a,b) => b.date.localeCompare(a.date)).slice(0,10);
+
+  const boardThis = boards[THIS_WK] || null;
+  const boardNext = boards[NEXT_WK] || null;
+
+  // Slots still open next week, once the teacher has published it.
+  const availableSlots = useMemo(
+    () => pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK]) : [],
+    [pubNext, boardNext, claims, NEXT_WK]
+  );
+
+  // Slots still open in the current week — only those at least 2h away.
+  const thisWkOpenSlots = useMemo(
+    () => freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2 }),
+    [boardThis, claims, THIS_WK]
+  );
+
+  function getMoveSlots(lesson) {
+    const same = s => s.date === lesson.date && s.time === lesson.time;
+    return {
+      thisWk: freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2 }).filter(s => !same(s)),
+      nextWk: pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK]).filter(s => !same(s)) : [],
+    };
+  }
+
+  function submitCancel(l) {
+    const isLate = hoursUntil(l.date, l.time) < 24;
+    updLesson(l.id, { status:'pending_cancel', lateCancel:isLate, reason, cancelledAt:new Date().toISOString() });
+    setCancelModal(null); setReason('');
+  }
+
+  function submitMove(oldLesson, newSlot) {
+    updLesson(oldLesson.id, { status:'moved' });
+    addLesson(me.id, newSlot.date, newSlot.time);
+    setMoveModal(null);
+    setMoveSuccess(`✓ השיעור הועבר ליום ${DAY_HE[newSlot.di]} ${dd(newSlot.date)} · ${newSlot.time}`);
+    setTimeout(() => setMoveSuccess(null), 5000);
+  }
+
+  function bookSlot(slot) { addLesson(me.id, slot.date, slot.time); }
+
+  const thisWkLesson  = upcoming.find(l => inWk(l.date, THIS_WK) && !l.id.endsWith('_2nd'));
+  const nextWkLesson  = upcoming.find(l => inWk(l.date, NEXT_WK) && !l.id.endsWith('_2nd'));
+  const thisWkLesson2 = upcoming.find(l => inWk(l.date, THIS_WK) &&  l.id.endsWith('_2nd'));
+  const nextWkLesson2 = upcoming.find(l => inWk(l.date, NEXT_WK) &&  l.id.endsWith('_2nd'));
+
+  const moveSlotsForLesson = moveModal ? getMoveSlots(moveModal) : { thisWk:[], nextWk:[] };
+
+  return (
+    <div>
+      {pubNext?.note && (
+        <div style={{ ...S.card, background:'#E6F1FB', border:'1.5px solid #B5D4F4', marginBottom:12 }}>
+          <div style={{ fontSize:12, color:'var(--color-text-info)', marginBottom:2 }}>הודעה מהמורה</div>
+          <div style={{ fontSize:14, color:'var(--color-text-info)' }}>{pubNext.note}</div>
+        </div>
+      )}
+
+      {(thisWkLesson2 || nextWkLesson2) && (
+        <div style={{ ...S.card, background:'#fef9c3', border:'1px solid #fde68a', marginBottom:10 }}>
+          <div style={{ fontSize:12, fontWeight:600, color:'#78350f', marginBottom:6 }}>⭐ שיעור שני</div>
+          {thisWkLesson2 && (
+            <div style={{ fontSize:13, color:'#92400e', marginBottom:nextWkLesson2?4:0 }}>
+              השבוע: יום {DAY_HE[parseD(thisWkLesson2.date).getDay()]} {dd(thisWkLesson2.date)} · {thisWkLesson2.time} <StatusBadge status={thisWkLesson2.status} />
+            </div>
+          )}
+          {nextWkLesson2 && (
+            <div style={{ fontSize:13, color:'#92400e' }}>
+              שבוע הבא: יום {DAY_HE[parseD(nextWkLesson2.date).getDay()]} {dd(nextWkLesson2.date)} · {nextWkLesson2.time} <StatusBadge status={nextWkLesson2.status} />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'8px 0 6px' }}>
+        השבוע · {dd(THIS_WK)}–{dd(addDays(THIS_WK,6))}
+      </div>
+      {thisWkLesson ? (
+        <LessonCard lesson={thisWkLesson} onCancel={() => setCancelModal(thisWkLesson)} onMove={() => setMoveModal(thisWkLesson)} showActions />
+      ) : (
+        <div style={S.card}>
+          <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:thisWkOpenSlots.length>0?10:0 }}>
+            {me.type==='flexible'?'לא נרשמת עדיין השבוע':'אין שיעור השבוע'}
+          </div>
+          {thisWkOpenSlots.length>0 && (
+            <div>
+              <div style={S.label}>בחר שעה פנויה:</div>
+              {thisWkOpenSlots.map(sl => (
+                <button key={`${sl.date}_${sl.time}`} style={{ ...S.btn('default'), marginBottom:6, width:'100%', textAlign:'right' }} onClick={() => bookSlot(sl)}>
+                  יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ ...S.row, margin:'14px 0 6px', justifyContent:'space-between' }}>
+        <span style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)' }}>שבוע הבא · {dd(NEXT_WK)}–{dd(addDays(NEXT_WK,6))}</span>
+        {!pubNext && <span style={S.badge('default')}>טרם פורסם</span>}
+      </div>
+
+      {pubNext ? (
+        nextWkLesson ? (
+          <LessonCard lesson={nextWkLesson} onCancel={() => setCancelModal(nextWkLesson)} onMove={() => setMoveModal(nextWkLesson)} showActions />
+        ) : (
+          <div style={S.card}>
+            <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:availableSlots.length>0?12:0 }}>
+              {me.type==='flexible'?'לא נרשמת לשבוע הבא':'השיעור שלך בוטל לשבוע הבא'}
+            </div>
+            {availableSlots.length>0 && (
+              <div>
+                <div style={{ ...S.label, marginBottom:8 }}>{me.type==='fixed'?'בחר שעת השלמה:':'בחר שעה:'}</div>
+                {availableSlots.map(sl => (
+                  <button key={`${sl.date}_${sl.time}`} style={{ ...S.btn('default'), marginBottom:6, width:'100%', textAlign:'right' }} onClick={() => bookSlot(sl)}>
+                    יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      ) : (
+        <div style={{ ...S.card, opacity:0.5 }}>
+          <div style={{ fontSize:14, color:'var(--color-text-secondary)' }}>המורה תפרסם את הלוח בקרוב</div>
+        </div>
+      )}
+
+      {history.length>0 && (
+        <>
+          <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'14px 0 6px' }}>היסטוריה</div>
+          {history.map(l => <LessonCard key={l.id} lesson={l} />)}
+        </>
+      )}
+
+      {moveSuccess && (
+        <div style={{ position:'fixed', bottom:30, left:'50%', transform:'translateX(-50%)', zIndex:300,
+          background:'#166534', color:'#fff', borderRadius:12, padding:'12px 20px',
+          fontSize:14, fontWeight:500, boxShadow:'0 4px 16px rgba(0,0,0,0.25)',
+          maxWidth:320, textAlign:'center', direction:'rtl', whiteSpace:'nowrap' }}>
+          {moveSuccess}
+        </div>
+      )}
+
+      {cancelModal && (
+        <Modal onClose={() => { setCancelModal(null); setReason(''); }}>
+          {hoursUntil(cancelModal.date, cancelModal.time) < 24 && (
+            <div style={{ background:'var(--color-background-danger)', borderRadius:'var(--border-radius-md)', padding:'10px 12px', marginBottom:14 }}>
+              <div style={{ fontSize:14, fontWeight:500, color:'var(--color-text-danger)' }}>ביטול פחות מ-24 שעות לפני השיעור</div>
+              <div style={{ fontSize:13, color:'var(--color-text-danger)', marginTop:4 }}>לפי מדיניות האולפן, ביטול זה ייחשב כשיעור שהתקיים.</div>
+            </div>
+          )}
+          <h3 style={{ margin:'0 0 12px', fontSize:16, fontWeight:500, direction:'rtl' }}>ביטול שיעור · {dd(cancelModal.date)} · {cancelModal.time}</h3>
+          <div style={S.label}>סיבת הביטול (חובה)</div>
+          <textarea style={{ ...S.input, minHeight:72, resize:'vertical', marginBottom:14 }}
+            placeholder="רשום את הסיבה לביטול..." value={reason} onChange={e => setReason(e.target.value)} autoFocus />
+          <div style={S.row}>
+            <button style={S.btn('ghost')} onClick={() => { setCancelModal(null); setReason(''); }}>חזרה</button>
+            <button style={{ ...S.btn('danger'), opacity:reason.trim().length<3?0.4:1 }}
+              disabled={reason.trim().length<3} onClick={() => submitCancel(cancelModal)}>שלח בקשת ביטול</button>
+          </div>
+        </Modal>
+      )}
+
+      {moveModal && (
+        <Modal onClose={() => setMoveModal(null)}>
+          <h3 style={{ margin:'0 0 6px', fontSize:16, fontWeight:500, direction:'rtl' }}>שינוי שעה</h3>
+          <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'8px 12px', marginBottom:14, direction:'rtl' }}>
+            <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:2 }}>שיעור נוכחי</div>
+            <div style={{ fontSize:14, fontWeight:500 }}>יום {DAY_HE[parseD(moveModal.date).getDay()]} {dd(moveModal.date)} · {moveModal.time}</div>
+          </div>
+
+          {moveSlotsForLesson.thisWk.length === 0 && moveSlotsForLesson.nextWk.length === 0 ? (
+            <div style={{ ...S.card, textAlign:'center', color:'var(--color-text-secondary)', fontSize:14, direction:'rtl' }}>
+              אין שעות פנויות זמינות כרגע
+            </div>
+          ) : (
+            <>
+              {moveSlotsForLesson.thisWk.length > 0 && (
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:'var(--color-text-secondary)', marginBottom:6, direction:'rtl' }}>
+                    השבוע · {dd(THIS_WK)}–{dd(addDays(THIS_WK,6))}
+                  </div>
+                  {moveSlotsForLesson.thisWk.map(sl => (
+                    <button key={`${sl.date}_${sl.time}`}
+                      style={{ ...S.btn('default'), marginBottom:5, width:'100%', textAlign:'right' }}
+                      onClick={() => submitMove(moveModal, sl)}>
+                      יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {moveSlotsForLesson.nextWk.length > 0 && (
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:'var(--color-text-secondary)', marginBottom:6, direction:'rtl' }}>
+                    שבוע הבא · {dd(NEXT_WK)}–{dd(addDays(NEXT_WK,6))}
+                  </div>
+                  {moveSlotsForLesson.nextWk.map(sl => (
+                    <button key={`${sl.date}_${sl.time}`}
+                      style={{ ...S.btn('default'), marginBottom:5, width:'100%', textAlign:'right' }}
+                      onClick={() => submitMove(moveModal, sl)}>
+                      יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          <button style={{ ...S.btn('ghost'), width:'100%', marginTop:4 }} onClick={() => setMoveModal(null)}>ביטול</button>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// LessonCard — shows status + optional cancel/move buttons
+function LessonCard({ lesson, onCancel, onMove, showActions }) {
+  const hol = getHoliday(lesson.date);
+  const isScheduled = lesson.status === 'scheduled';
+  const isPending   = lesson.status === 'pending_cancel';
+  const cardStyle = {
+    ...S.card,
+    ...(isScheduled ? { background:'#E6F1FB', border:'1.5px solid #B5D4F4' } : {}),
+    ...(isPending   ? { background:'#FAEEDA', border:'1.5px solid #FAC775' } : {}),
+  };
+  return (
+    <div style={cardStyle}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:8 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ ...S.row, marginBottom:4 }}>
+            <span style={{ fontSize:15, fontWeight:700, color: isScheduled?'#185FA5':'var(--color-text-primary)' }}>יום {DAY_HE[parseD(lesson.date).getDay()]} {dd(lesson.date)}</span>
+            <span style={{ fontSize:15, color: isScheduled?'#378ADD':'var(--color-text-primary)' }}>· {lesson.time}</span>
+          </div>
+          {hol && <HolBadge date={lesson.date} />}
+          <StatusBadge status={lesson.status} />
+          {lesson.reason && <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginTop:4 }}>סיבה: {lesson.reason}</div>}
+        </div>
+        {showActions && lesson.status==='scheduled' && (
+          <div style={{ display:'flex', flexDirection:'column', gap:5, flexShrink:0 }}>
+            {onMove && (
+              <button style={{ ...S.btn('info'), padding:'6px 12px', fontSize:12 }} onClick={onMove}>שנה שעה</button>
+            )}
+            <button style={{ ...S.btn('danger'), padding:'6px 12px', fontSize:12 }} onClick={onCancel}>בטל</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Student: Class Board — calendar built from the published board ────────────
+function StudentBoardTab({ ctx }) {
+  const { me, lessons, THIS_WK, NEXT_WK, boards, claims, pubNext } = ctx;
+  const [weekView, setWeekView] = useState('this');
+
+  const activeWk = weekView==='this' ? THIS_WK : NEXT_WK;
+  const board    = boards[activeWk] || null;
+  const cl       = claims[activeWk] || {};
+
+  const slots = useMemo(() => boardSlotsFor(activeWk, board, cl), [activeWk, board, cl]);
+
+  const teachingDays = useMemo(() => {
+    const diSet = new Set(slots.map(s => s.di));
+    return [...diSet].sort().map(di => ({ date: dateOfDi(activeWk, di), di }));
+  }, [slots, activeWk]);
+
+  // Which slot is mine comes from my own lessons, never from the shared board.
+  const mineKeys = useMemo(() => new Set(
+    lessons.filter(l => l.sid === me.id && ['scheduled','pending_cancel'].includes(l.status))
+           .map(l => `${l.date}_${l.time}`)
+  ), [lessons, me.id]);
+
+  const calItems = useMemo(() => slots.map(s => ({
+    id: `${s.date}_${s.t}`, date: s.date, time: s.t, di: s.di,
+    state: s.state, name: s.name, mine: mineKeys.has(`${s.date}_${s.t}`),
+  })), [slots, mineKeys]);
+
+  function renderItem(item, top, height) {
+    let bg, border, fg, label;
+    if (item.state === 'blocked')    { bg='#fee2e2'; border='#fca5a5'; fg='#991b1b'; label='🚫 חסום'; }
+    else if (item.state === 'free')  { bg='#f0fdf4'; border='#86efac'; fg='#166534'; label='פנוי'; }
+    else if (item.mine)              { bg='#fef9c3'; border='#fde68a'; fg='#78350f'; label='⭐ השיעור שלי'; }
+    else                             { bg='#dbeafe'; border='#93c5fd'; fg='#1e40af'; label=item.name || 'תפוס'; }
+    return (
+      <div key={item.id} style={{
+        position:'absolute', top, left:2, right:2, height,
+        background:bg, border:`1.5px ${item.state==='free'?'dashed':'solid'} ${border}`,
+        borderRadius:5, padding:'3px 5px', overflow:'hidden',
+      }}>
+        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
+        <div style={{ fontSize:10, color:fg }}>{item.time}</div>
+      </div>
+    );
+  }
+
+  const nextDisabled = !pubNext;
+  return (
+    <div>
+      <div style={{ ...S.row, gap:0, marginBottom:12, background:'var(--color-background-secondary)', borderRadius:8, padding:3 }}>
+        {[['this','השבוע'],['next','שבוע הבא']].map(([key,label]) => (
+          <button key={key} style={{
+            flex:1, padding:'7px 0', fontSize:13, fontWeight:500, borderRadius:6, border:'none',
+            cursor:(key==='next'&&nextDisabled)?'not-allowed':'pointer',
+            background:weekView===key?'var(--color-background-primary)':'transparent',
+            color:weekView===key?'var(--color-text-primary)':'var(--color-text-secondary)',
+            opacity:(key==='next'&&nextDisabled)?0.5:1,
+            boxShadow:weekView===key?'0 1px 3px rgba(0,0,0,0.1)':'none',
+          }} onClick={() => { if(key==='next'&&nextDisabled) return; setWeekView(key); }}>
+            {label}{key==='next'&&nextDisabled?' (לא פורסם)':''}
+          </button>
+        ))}
+      </div>
+      <div style={{ ...S.row, gap:12, marginBottom:10, flexWrap:'wrap' }}>
+        {[['#dbeafe','#93c5fd','תפוס'],['#f0fdf4','#86efac','פנוי'],['#fef9c3','#fde68a','השיעור שלי']].map(([bg,bd,l]) => (
+          <div key={l} style={{ ...S.row, gap:4 }}>
+            <div style={{ width:10, height:10, borderRadius:2, background:bg, border:`1px solid ${bd}` }} />
+            <span style={{ fontSize:11, color:'var(--color-text-secondary)' }}>{l}</span>
+          </div>
+        ))}
+      </div>
+      {teachingDays.length === 0 ? (
+        <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>
+          הלוח לשבוע זה טרם פורסם
+        </div>
+      ) : (
+        <WeekCalendar days={teachingDays} items={calItems} renderItem={renderItem} />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOT — auth, tenancy, and the Firestore data layer
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//  teachers/{tid}                      private: name, studio, slots, holidays
+//  teachers/{tid}/board/{weekStart}    published week — what students may see
+//  teachers/{tid}/claims/{weekStart}   live slot claims made after publishing
+//  students/{code}                     `code` is the doc id and the secret
+//  students/{code}/lessons/{lessonId}  written only when something happened
+//  pending_students/{autoId}           registration inbox, per teacher
+//
+//  No lesson is written ahead of time. The coming weeks are projected from the
+//  teacher's recurring slots; a document appears only once a lesson was held,
+//  cancelled, moved, or booked as a one-off. Moving a student to a different
+//  hour is therefore one write, not eighty.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STORE_KEY = 'studio.studentCode';
+
+function readStoredCode() {
+  try { return localStorage.getItem(STORE_KEY) || ''; } catch (e) { return ''; }
+}
+function writeStoredCode(code) {
+  try { code ? localStorage.setItem(STORE_KEY, code) : localStorage.removeItem(STORE_KEY); } catch (e) {}
+}
+
+// #register/<teacherId> · #s/<code> · #<code>
+function parseRoute() {
+  const h = (location.hash || '').replace(/^#\/?/, '');
+  if (!h) return { kind: 'none' };
+  const [head, tail] = h.split('/');
+  if (head === 'register') return { kind: 'register', teacherId: tail || '' };
+  if (head === 's' && tail) return { kind: 'student', code: tail.toUpperCase() };
+  if (/^[A-Z0-9]{4,10}$/i.test(head)) return { kind: 'student', code: head.toUpperCase() };
+  return { kind: 'none' };
+}
+
+function MusicScheduler() {
+  const [db,       setDb]       = useState(null);
+  const [auth,     setAuth]     = useState(null);
+  const [ready,    setReady]    = useState(false);   // anonymous session established
+  const [fatal,    setFatal]    = useState('');
+  const [fatalLink, setFatalLink] = useState('');
+
+  const [teacherUid, setTeacherUid] = useState(null);
+  const [teacher,    setTeacher]    = useState(null);
+  const [students,   setStudents]   = useState([]);
+  const [pendingStudents, setPendingStudents] = useState([]);
+  const [realLessons, setRealLessons] = useState([]);
+  const [lessonsLoaded, setLessonsLoaded] = useState(false);
+  const [boards,     setBoards]     = useState({});
+  const [claims,     setClaims]     = useState({});
+
+  const [studentCode, setStudentCode] = useState(() => {
+    const r = parseRoute();
+    return r.kind === 'student' ? r.code : readStoredCode();
+  });
+  const [me,        setMe]        = useState(null);
+  const [meError,   setMeError]   = useState('');
+  const [approvedInfo, setApprovedInfo] = useState(null);
+
+  const backfilledRef = useRef(false);
+  const route     = parseRoute();
+  const isTeacher = !!teacherUid;
+  const isStudent = !isTeacher && !!me;
+
+  const TODAY   = todayS();
+  const THIS_WK = wkStart(TODAY);
+  const NEXT_WK = addDays(THIS_WK, 7);
+  const PROJ_WEEKS = [THIS_WK, NEXT_WK, addDays(NEXT_WK, 7)];
+
+  // ── refs ──────────────────────────────────────────────────────────────────
+  const teacherRef = () => db.collection('teachers').doc(teacherUid);
+  const studentRef = (sid) => db.collection('students').doc(sid);
+  const lessonRef  = (sid, id) => studentRef(sid).collection('lessons').doc(id);
+  const boardRef   = (tid, ws) => db.collection('teachers').doc(tid).collection('board').doc(ws);
+  const claimsRef  = (tid, ws) => db.collection('teachers').doc(tid).collection('claims').doc(ws);
+
+  // ── boot: firebase + anonymous session ────────────────────────────────────
+  useEffect(() => {
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    const fs = firebase.firestore();
+    const au = firebase.auth();
+    setDb(fs); setAuth(au);
+
+    const unsub = au.onAuthStateChanged(async user => {
+      if (!user) {
+        try { await au.signInAnonymously(); }
+        catch (e) {
+          console.error(e);
+          setFatal('לא ניתן להתחבר לשרת. ודא שהאימות האנונימי מופעל ב-Firebase Console.');
+        }
+        return;                       // the listener fires again with the new user
+      }
+      setTeacherUid(user.isAnonymous ? null : user.uid);
+      setReady(true);
+    });
+    return unsub;
+  }, []);
+
+  // ── teacher subscriptions ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (!db || !teacherUid) return;
+    const subs = [];
+    const tRef = db.collection('teachers').doc(teacherUid);
+
+    subs.push(tRef.onSnapshot(async doc => {
+      if (!doc.exists) {
+        const email = auth?.currentUser?.email || '';
+        await tRef.set({
+          teacherId: teacherUid,
+          name: email.split('@')[0] || 'מורה',
+          studioName: 'אולפן מוסיקה',
+          slots: [], holidays: DEFAULT_HOLIDAYS,
+          lastSweep: null, createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+      const data = doc.data();
+
+      // Any slot missing `since` predates that field. Left unstamped it would
+      // let the sweep project today's schedule onto past weeks. Stamp it once,
+      // from the studio's own start date.
+      const slots = data.slots || [];
+      if (slots.some(s => !s.since) && !backfilledRef.current) {
+        backfilledRef.current = true;
+        const start = (data.createdAt || '').slice(0, 10) || TODAY;
+        await tRef.set({ slots: slots.map(s => s.since ? s : { ...s, since: start }) }, { merge:true });
+        return;
+      }
+
+      setHolidays(data.holidays);
+      setTeacher({ uid: teacherUid, ...data });
+    }, e => { console.error(e); setFatal('טעינת נתוני המורה נכשלה.'); }));
+
+    subs.push(db.collection('students').where('teacherId', '==', teacherUid)
+      .onSnapshot(s => setStudents(s.docs.map(d => ({ ...d.data(), id: d.id })))));
+
+    subs.push(db.collection('pending_students').where('teacherId', '==', teacherUid)
+      .onSnapshot(s => setPendingStudents(s.docs.map(d => ({ ...d.data(), id: d.id })))));
+
+    subs.push(db.collectionGroup('lessons').where('teacherId', '==', teacherUid)
+      .onSnapshot(
+        s => { setRealLessons(s.docs.map(d => ({ ...d.data(), id: d.id }))); setLessonsLoaded(true); },
+        e => {
+          console.error(e);
+          // Firestore puts a one-click "create this index" URL in the error
+          // text. Surfacing it beats telling a non-developer to open DevTools.
+          const url = (e.message || '').match(/https:\/\/console\.firebase\.google\.com\S+/);
+          if (url) {
+            setFatal('חסר אינדקס במסד הנתונים. לחץ על הכפתור למטה, ואז על "Create index" בעמוד שייפתח. ההכנה לוקחת כדקה — אחר כך רענן את הדף.');
+            setFatalLink(url[0].replace(/[.,)\]]+$/, ''));
+          } else {
+            setFatal('טעינת השיעורים נכשלה. בדוק את החיבור לאינטרנט ורענן את הדף.');
+          }
+        }
+      ));
+
+    subs.push(tRef.collection('board').onSnapshot(s => {
+      const m = {}; s.docs.forEach(d => { m[d.id] = { ...d.data(), weekStart: d.id }; });
+      setBoards(m);
+    }));
+
+    subs.push(tRef.collection('claims').onSnapshot(s => {
+      const m = {}; s.docs.forEach(d => { m[d.id] = d.data() || {}; });
+      setClaims(m);
+    }));
+
+    return () => subs.forEach(u => u());
+  }, [db, teacherUid, auth]);
+
+  // ── student subscriptions ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (!db || !ready || teacherUid || !studentCode) return;
+    let subs = [];
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const doc = await db.collection('students').doc(studentCode).get();
+        if (cancelled) return;
+        if (!doc.exists || doc.data().status === 'deleted') {
+          setMeError('הקוד לא נמצא. בקש מהמורה קישור חדש.');
+          writeStoredCode(''); setStudentCode('');
+          return;
+        }
+        const stu = { ...doc.data(), id: doc.id };
+        setMe(stu); setMeError('');
+        writeStoredCode(studentCode);
+        const tid = stu.teacherId;
+
+        subs.push(db.collection('students').doc(studentCode).collection('lessons')
+          .onSnapshot(s => setRealLessons(s.docs.map(d => ({ ...d.data(), id: d.id })))));
+
+        subs.push(db.collection('teachers').doc(tid).collection('board').onSnapshot(s => {
+          const m = {};
+          s.docs.forEach(d => {
+            const data = d.data();
+            m[d.id] = { ...data, weekStart: d.id };
+            if (data.holidays) setHolidays(data.holidays);
+          });
+          setBoards(m);
+        }));
+
+        subs.push(db.collection('teachers').doc(tid).collection('claims').onSnapshot(s => {
+          const m = {}; s.docs.forEach(d => { m[d.id] = d.data() || {}; });
+          setClaims(m);
+        }));
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setMeError('לא הצלחנו לטעון את הנתונים. בדוק את החיבור לאינטרנט.');
+      }
+    })();
+
+    return () => { cancelled = true; subs.forEach(u => u()); };
+  }, [db, ready, teacherUid, studentCode]);
+
+  // ── students enriched with their slot, read off the authoritative schedule ──
+  const enrichedStudents = useMemo(() => {
+    const slots = teacher?.slots || [];
+    return students.map(s => {
+      const slot = slots.find(sl => sl.sid === s.id);
+      return { ...s, di: slot ? slot.di : null, t: slot ? slot.t : null,
+               type: slot ? 'fixed' : (s.type === 'fixed' ? 'flexible' : s.type) };
+    });
+  }, [students, teacher]);
+
+  // ── the flat lesson array the whole UI expects ────────────────────────────
+  const lessons = useMemo(() => {
+    if (isTeacher) return projectLessons(teacher?.slots || [], enrichedStudents, realLessons, PROJ_WEEKS);
+    if (me) {
+      const slots = (me.di != null && me.t) ? [{ di: me.di, t: me.t, sid: me.id }] : [];
+      return projectLessons(slots, [me], realLessons, PROJ_WEEKS);
+    }
+    return [];
+  }, [isTeacher, teacher, enrichedStudents, realLessons, me, THIS_WK]);
+
+  // ── record lessons that have already happened ─────────────────────────────
+  // Runs once per teacher session. A lesson becomes a real document only here,
+  // after its time has passed — which is what makes history factual rather than
+  // derived from a schedule that may since have changed.
+  const sweptRef = useRef(false);
+  useEffect(() => {
+    // `lessonsLoaded` is not optional. Sweeping before the existing lessons
+    // arrive would see every projected lesson as virtual and overwrite real
+    // cancellations with "completed" — silently destroying the history it is
+    // meant to record.
+    if (!db || !isTeacher || !teacher || !lessonsLoaded || sweptRef.current) return;
+    if (!enrichedStudents.length) return;
+    sweptRef.current = true;
+
+    (async () => {
+      try {
+        const from  = teacher.lastSweep || fmtD(new Date(Date.now() - 35 * 864e5));
+        const weeks = weeksBetween(from, TODAY, 12);
+        if (!weeks.length) return;
+
+        const known = new Set(realLessons.map(l => l.id));
+        const due = projectLessons(teacher.slots || [], enrichedStudents, realLessons, weeks)
+          .filter(l => l.virtual && l.date < TODAY && !getHoliday(l.date))
+          .filter(l => !known.has(l.id));      // never touch an existing record
+
+        for (let i = 0; i < due.length; i += 400) {
+          const b = db.batch();
+          due.slice(i, i + 400).forEach(l => b.set(
+            lessonRef(l.sid, l.id),
+            { id:l.id, teacherId:teacherUid, sid:l.sid, date:l.date, time:l.time,
+              status:'completed', reason:'', autoMarked:true },
+            { merge:true }
+          ));
+          await b.commit();
+        }
+        // Advance only as far as we actually swept — the 12-week cap must not
+        // silently swallow the weeks beyond it after a long absence.
+        await teacherRef().set({ lastSweep: weeks[weeks.length - 1] }, { merge:true });
+      } catch (e) { console.error('sweep failed', e); }
+    })();
+  }, [db, isTeacher, teacher, lessonsLoaded, enrichedStudents, realLessons]);
+
+  // ── auth actions ──────────────────────────────────────────────────────────
+  async function loginTeacher(email, pass) {
+    try {
+      await auth.signInWithEmailAndPassword(email, pass);
+      return '';
+    } catch (e) {
+      const bad = ['auth/invalid-credential','auth/wrong-password','auth/user-not-found','auth/invalid-email'];
+      if (bad.includes(e.code)) return 'אימייל או סיסמה שגויים';
+      if (e.code === 'auth/too-many-requests') return 'יותר מדי ניסיונות. נסה שוב בעוד כמה דקות.';
+      console.error(e);
+      return 'ההתחברות נכשלה — בדוק את החיבור לאינטרנט';
+    }
+  }
+
+  async function loginStudent(code) {
+    try {
+      const doc = await db.collection('students').doc(code).get();
+      if (!doc.exists || doc.data().status === 'deleted') return 'הקוד לא נמצא';
+      writeStoredCode(code);
+      setStudentCode(code);
+      setMeError('');
+      return '';
+    } catch (e) { console.error(e); return 'הבדיקה נכשלה — בדוק את החיבור'; }
+  }
+
+  async function logout() {
+    writeStoredCode('');
+    setStudentCode(''); setMe(null); setMeError('');
+    setTeacher(null); setStudents([]); setPendingStudents([]);
+    setRealLessons([]); setBoards({}); setClaims({});
+    // Must reset with realLessons — a stale `true` here would let the next
+    // session's sweep run against an empty lesson list and overwrite records.
+    setLessonsLoaded(false);
+    sweptRef.current = false;
+    if (location.hash) location.hash = '';
+    try { await auth.signOut(); } catch (e) { console.error(e); }
+  }
+
+  // ── lesson mutations ──────────────────────────────────────────────────────
+  // A virtual lesson becomes a real document the first time it is touched.
+  // Claims mark an hour as taken for everyone else. They carry a display name
+  // and nothing else — never the code that identifies the student.
+  const HOLDS = ['scheduled', 'pending_cancel'];
+
+  function setClaim(tid, date, time, name) {
+    return claimsRef(tid, wkStart(date))
+      .set({ [claimKey(parseD(date).getDay(), time)]: { name: name || '' } }, { merge: true })
+      .catch(e => console.error('setClaim', e));
+  }
+  function releaseClaim(tid, date, time) {
+    return claimsRef(tid, wkStart(date))
+      .update({ [claimKey(parseD(date).getDay(), time)]: firebase.firestore.FieldValue.delete() })
+      .catch(e => {       // the week may simply have no claims document yet
+        if (e?.code !== 'not-found') console.error('releaseClaim', e);
+      });
+  }
+
+  async function updLesson(id, patch) {
+    const l = lessons.find(x => x.id === id);
+    if (!l) return;
+    const tid = isTeacher ? teacherUid : me?.teacherId;
+    try {
+      await lessonRef(l.sid, id).set({
+        id, teacherId: tid, sid: l.sid, date: l.date, time: l.time,
+        status: l.status, reason: l.reason || '', ...patch,
+      }, { merge: true });
+      // A lesson that stops holding its hour must hand the hour back, or the
+      // slot stays "taken" on every student's board forever.
+      const next = patch.status || l.status;
+      if (HOLDS.includes(l.status) && !HOLDS.includes(next)) {
+        await releaseClaim(tid, l.date, l.time);
+      }
+    } catch (e) { console.error('updLesson', e); }
+  }
+
+  // A lesson that has already been adjudicated is history and must not be
+  // overwritten. Re-booking the same hour therefore starts a new record rather
+  // than merging over the old verdict — the cancellation and the fresh booking
+  // both survive.
+  const SETTLED = ['completed','cancelled_justified','cancelled_unjustified',
+                   'teacher_cancelled','no_show','moved'];
+
+  async function addLesson(sid, date, time) {
+    const tid  = isTeacher ? teacherUid : me?.teacherId;
+    const base = lessonId(sid, date, time);
+    const stu  = isTeacher ? enrichedStudents.find(s => s.id === sid) : me;
+    const prev = lessons.find(l => l.id === base && !l.virtual);
+    const id   = (prev && SETTLED.includes(prev.status))
+      ? `${base}_r${Math.random().toString(36).slice(2, 6)}`
+      : base;
+    try {
+      await lessonRef(sid, id).set({
+        id, teacherId: tid, sid, date, time,
+        status: 'scheduled', reason: '', cancelledAt: null,
+      }, { merge: true });
+      await setClaim(tid, date, time, stu?.name);
+    } catch (e) {
+      console.error('addLesson', e);
+      alert('ההרשמה לשעה נכשלה. רענן את הדף ונסה שוב.');
+    }
+  }
+
+  // ── publishing ────────────────────────────────────────────────────────────
+  function buildBoardSlots(cancelledIds, blockedSlots, extraSlots) {
+    const out = [], seen = new Set();
+    const isBlocked = (di, t) => blockedSlots.some(b => b.di === di && b.t === t);
+
+    (teacher?.slots || []).forEach(sl => {
+      const key = `${sl.di}_${sl.t}`;
+      if (seen.has(key)) return; seen.add(key);
+      const stu     = sl.sid ? enrichedStudents.find(s => s.id === sl.sid) : null;
+      const removed = stu ? cancelledIds.includes(stu.id) : false;
+      let state = 'free', name = null;
+      if (isBlocked(sl.di, sl.t))     state = 'blocked';
+      else if (stu && !removed)     { state = 'taken'; name = stu.name; }
+      out.push({ di: sl.di, t: sl.t, state, name });
+    });
+
+    (extraSlots || []).forEach(sl => {
+      const key = `${sl.di}_${sl.t}`;
+      if (seen.has(key)) return; seen.add(key);
+      out.push({ di: sl.di, t: sl.t, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null });
+    });
+
+    return out;
+  }
+
+  async function pubWeek(ws, cancelledIds, blockedSlots, extraSlots, note) {
+    try {
+      const batch = db.batch();
+
+      // The teacher's own planning state stays on her private document.
+      // `cancelledIds` holds student codes, so it must never reach the board.
+      batch.set(teacherRef(), {
+        weekPlans: { [ws]: { weekStart:ws, cancelledIds, blockedSlots, extraSlots, note: note || '' } },
+      }, { merge:true });
+
+      // Cancelled or blocked lessons become real documents recording the fact,
+      // and give their hour back so the board does not show it as taken.
+      const freed = {};
+      lessons.filter(l => inWk(l.date, ws) && l.status === 'scheduled').forEach(l => {
+        const di = parseD(l.date).getDay();
+        const hit = cancelledIds.includes(l.sid) || blockedSlots.some(b => b.di === di && b.t === l.time);
+        if (!hit) return;
+        batch.set(lessonRef(l.sid, l.id), {
+          id:l.id, teacherId:teacherUid, sid:l.sid, date:l.date, time:l.time,
+          status:'teacher_cancelled', reason:l.reason || '',
+        }, { merge:true });
+        freed[claimKey(di, l.time)] = firebase.firestore.FieldValue.delete();
+      });
+
+      // The board is what students receive: slot states and names only —
+      // never a code, a phone number, or the student list.
+      batch.set(boardRef(teacherUid, ws), {
+        weekStart: ws, note: note || '',
+        studioName: teacher?.studioName || '',
+        slots: buildBoardSlots(cancelledIds, blockedSlots, extraSlots),
+        holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
+        publishedAt: new Date().toISOString(),
+      });
+
+      // Students may amend the claims map but never create it, so publishing
+      // is what opens the week for booking. merge:true leaves other claims
+      // untouched when the week is republished.
+      batch.set(claimsRef(teacherUid, ws), freed, { merge:true });
+
+      await batch.commit();
+    } catch (e) { console.error('pubWeek', e); alert('הפרסום נכשל. בדוק את החיבור ונסה שוב.'); }
+  }
+
+  async function clearPublishedWeek(ws) {
+    try {
+      const plans = { ...(teacher?.weekPlans || {}) };
+      delete plans[ws];
+      await teacherRef().set({ weekPlans: plans }, { merge:true });
+      await boardRef(teacherUid, ws).delete().catch(() => {});
+      await claimsRef(teacherUid, ws).delete().catch(() => {});
+    } catch (e) { console.error('clearPublishedWeek', e); }
+  }
+
+  // ── recurring schedule ────────────────────────────────────────────────────
+  // Each of these is one or two writes. Nothing walks the calendar.
+  async function addBaseSlot(di, t, sid = null) {
+    const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
+                   { di, t, sid: sid || null, since: TODAY }];
+    const batch = db.batch();
+    batch.set(teacherRef(), { slots }, { merge:true });
+    if (sid) batch.update(studentRef(sid), { type:'fixed', di, t });
+    await batch.commit().catch(e => console.error('addBaseSlot', e));
+  }
+
+  async function removeBaseSlot(di, t) {
+    const slot  = (teacher?.slots || []).find(s => s.di === di && s.t === t);
+    const slots = (teacher?.slots || []).filter(s => !(s.di === di && s.t === t));
+    const batch = db.batch();
+    batch.set(teacherRef(), { slots }, { merge:true });
+    if (slot?.sid && students.some(s => s.id === slot.sid)) {
+      batch.update(studentRef(slot.sid), { type:'flexible', di:null, t:null });
+    }
+    await batch.commit().catch(e => console.error('removeBaseSlot', e));
+  }
+
+  async function moveBaseSlot(oldDi, oldT, newDi, newT) {
+    const slot = (teacher?.slots || []).find(s => s.di === oldDi && s.t === oldT);
+    if (!slot) return;
+    const slots = (teacher?.slots || []).map(s =>
+      s.di === oldDi && s.t === oldT ? { ...s, di:newDi, t:newT, since: TODAY } : s);
+    const batch = db.batch();
+    batch.set(teacherRef(), { slots }, { merge:true });
+    if (slot.sid && students.some(s => s.id === slot.sid)) {
+      batch.update(studentRef(slot.sid), { di:newDi, t:newT });
+    }
+    await batch.commit().catch(e => console.error('moveBaseSlot', e));
+  }
+
+  function fixOrphanedSlot(di, t) {
+    const slots = (teacher?.slots || []).map(s => s.di === di && s.t === t ? { ...s, sid:null } : s);
+    return teacherRef().set({ slots }, { merge:true }).catch(e => console.error(e));
+  }
+
+  // ── students ──────────────────────────────────────────────────────────────
+  async function deleteStudent(sid) {
+    try {
+      const slots = (teacher?.slots || []).map(s => s.sid === sid ? { ...s, sid:null } : s);
+      await teacherRef().set({ slots }, { merge:true });
+
+      // Hand back any hours they were still holding, or those slots stay
+      // "taken" on every student's board with no lesson behind them.
+      const held = lessons.filter(l => l.sid === sid && HOLDS.includes(l.status) && l.date >= THIS_WK);
+      const byWeek = {};
+      held.forEach(l => {
+        const ws = wkStart(l.date);
+        (byWeek[ws] = byWeek[ws] || {})[claimKey(parseD(l.date).getDay(), l.time)] =
+          firebase.firestore.FieldValue.delete();
+      });
+      await Promise.all(Object.entries(byWeek).map(([ws, patch]) =>
+        claimsRef(teacherUid, ws).set(patch, { merge:true }).catch(() => {})));
+
+      const snap = await studentRef(sid).collection('lessons').get();
+      for (let i = 0; i < snap.docs.length; i += 400) {
+        const b = db.batch();
+        snap.docs.slice(i, i + 400).forEach(d => b.delete(d.ref));
+        await b.commit();
+      }
+      await studentRef(sid).delete();
+    } catch (e) { console.error('deleteStudent', e); }
+  }
+
+  function assignSecondSlot(sid, slot) {
+    return studentRef(sid).update({ secondSlot: { ...slot, since: TODAY } })
+                          .catch(e => console.error(e));
+  }
+  function removeSecondSlot(sid) {
+    return studentRef(sid).update({ secondSlot: null }).catch(e => console.error(e));
+  }
+  function changeToFixed(sid, di, t) { return addBaseSlot(di, t, sid); }
+
+  async function changeToFlexible(sid, keepSlotOpen) {
+    const slot = (teacher?.slots || []).find(s => s.sid === sid);
+    if (!slot) return studentRef(sid).update({ type:'flexible', di:null, t:null });
+    if (keepSlotOpen) {
+      const slots = (teacher?.slots || []).map(s => s.sid === sid ? { ...s, sid:null } : s);
+      const batch = db.batch();
+      batch.set(teacherRef(), { slots }, { merge:true });
+      batch.update(studentRef(sid), { type:'flexible', di:null, t:null });
+      await batch.commit().catch(e => console.error(e));
+    } else {
+      await removeBaseSlot(slot.di, slot.t);
+    }
+  }
+
+  // Codes must be unguessable and unique — the document id is the secret.
+  async function allocCode() {
+    for (let i = 0; i < 8; i++) {
+      const c = genCode(6);
+      const d = await db.collection('students').doc(c).get();
+      if (!d.exists) return c;
+    }
+    return genCode(9);
+  }
+
+  // Shared by "approve a registration" and "add a student myself".
+  async function createStudent({ name, phone, parent, type, di, t }, pendingId) {
+    const code  = await allocCode();
+    const fixed = type === 'fixed' && di != null && t;
+    const batch = db.batch();
+    batch.set(studentRef(code), {
+      teacherId: teacherUid, code,
+      name: name.trim(), phone: phone || '', parent: parent || '',
+      type: fixed ? 'fixed' : 'flexible', status: 'active',
+      di: fixed ? di : null, t: fixed ? t : null,
+      secondSlot: null, createdAt: new Date().toISOString(),
+    });
+    if (pendingId) batch.delete(db.collection('pending_students').doc(pendingId));
+    if (fixed) {
+      const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
+                     { di, t, sid: code, since: TODAY }];
+      batch.set(teacherRef(), { slots }, { merge:true });
+    }
+    await batch.commit();
+    setApprovedInfo({ name: name.trim(), code });
+  }
+
+  async function approveStudent(pendingId, ps, assignType, aDi, aT) {
+    try {
+      await createStudent({ name:ps.name, phone:ps.phone, parent:ps.parent,
+                            type:assignType, di:aDi, t:aT }, pendingId);
+    } catch (e) { console.error('approveStudent', e); alert('אישור התלמיד נכשל. נסה שוב.'); }
+  }
+
+  async function addStudent(data) {
+    try { await createStudent(data, null); }
+    catch (e) { console.error('addStudent', e); alert('הוספת התלמיד נכשלה. נסה שוב.'); }
+  }
+
+  function rejectStudent(pendingId) {
+    return db.collection('pending_students').doc(pendingId).delete().catch(e => console.error(e));
+  }
+
+  // ── render ────────────────────────────────────────────────────────────────
+  if (fatal) return (
+    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', minHeight:'100vh', gap:14, padding:24, background:'var(--color-background-tertiary)' }}>
+      <div style={{ fontSize:44 }}>⚠️</div>
+      <div style={{ fontSize:15, color:'var(--color-text-danger)', textAlign:'center', maxWidth:340, lineHeight:1.7, direction:'rtl' }}>{fatal}</div>
+      {fatalLink && (
+        <>
+          <a href={fatalLink} target="_blank" rel="noopener noreferrer"
+             style={{ ...S.btn('primary'), textDecoration:'none', display:'inline-block', padding:'12px 22px' }}>
+            פתח את דף יצירת האינדקס ↗
+          </a>
+          <button style={{ ...S.btn('default'), marginTop:4 }} onClick={() => location.reload()}>
+            סיימתי — רענן
+          </button>
+        </>
+      )}
+    </div>
+  );
+
+  if (!db || !ready) return <LoadingView />;
+
+  if (route.kind === 'register') {
+    return <RegisterView db={db} teacherId={route.teacherId} studioName="" />;
+  }
+
+  // The teacher edits her private plan for next week; students see the board
+  // that was published from it. Both are truthy only once the week is out.
+  const pubNext = isTeacher
+    ? (teacher?.weekPlans?.[NEXT_WK] || null)
+    : (boards[NEXT_WK] || null);
+
+  const ctx = {
+    students: enrichedStudents, pendingStudents, lessons,
+    TODAY, THIS_WK, NEXT_WK, pubNext, boards, claims,
+    updLesson, addLesson, pubWeek, approveStudent, rejectStudent, deleteStudent,
+    approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
+    baseSlots: teacher?.slots || [],
+    addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
+    assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
+    addStudent, teacher, me, logout,
+  };
+
+  if (isTeacher) {
+    if (!teacher) return <LoadingView />;
+    return <TeacherView ctx={ctx} />;
+  }
+  if (isStudent) return <StudentView ctx={ctx} />;
+  if (studentCode && !meError) return <LoadingView />;
+
+  return (
+    <>
+      <LoginView onTeacher={loginTeacher} onStudent={loginStudent} />
+      {meError && (
+        <div style={{ position:'fixed', bottom:24, left:'50%', transform:'translateX(-50%)',
+          background:'var(--color-background-danger)', color:'var(--color-text-danger)',
+          padding:'10px 18px', borderRadius:10, fontSize:13, maxWidth:320, textAlign:'center', direction:'rtl' }}>
+          {meError}
+        </div>
+      )}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(MusicScheduler));
+
+</script>
+</body>
+</html>

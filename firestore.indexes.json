@@ -1,0 +1,26 @@
+{
+  "indexes": [],
+
+  "//": "The teacher's week view runs db.collectionGroup('lessons').where('teacherId','==',uid). Firestore's automatic single-field indexes are COLLECTION-scoped only, so a collection-GROUP query on one field needs this explicit override. Without it that query errors and the teacher sees the error screen instead of her week.",
+
+  "fieldOverrides": [
+    {
+      "collectionGroup": "lessons",
+      "fieldPath": "teacherId",
+      "indexes": [
+        { "order": "ASCENDING",  "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING",  "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
+      "collectionGroup": "lessons",
+      "fieldPath": "date",
+      "indexes": [
+        { "order": "ASCENDING",  "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING",  "queryScope": "COLLECTION_GROUP" }
+      ]
+    }
+  ]
+}
