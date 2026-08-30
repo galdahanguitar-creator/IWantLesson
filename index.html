@@ -662,7 +662,7 @@ function TeacherView({ ctx }) {
           Students tab as well as from Requests, and the code has to be shown
           either way. */}
       {ctx.approvedInfo && (
-        <ApprovedCodeModal info={ctx.approvedInfo} onClose={ctx.clearApprovedInfo} />
+        <ApprovedCodeModal info={ctx.approvedInfo} template={ctx.teacher?.welcomeMsg} onClose={ctx.clearApprovedInfo} />
       )}
     </div>
   );
@@ -1626,6 +1626,63 @@ function OneTimeLessonAdder({ sid, addLesson, lessons, students, THIS_WK, NEXT_W
   );
 }
 
+// ── Edit a student's details ─────────────────────────────────────────────────
+// Names get typed in a hurry and phone numbers change. Both of these travel
+// with the published board and with the taken-hours map, so saving here has to
+// rewrite those too — which is why it goes through updateStudent rather than
+// touching the document directly.
+function EditStudentModal({ stu, onClose, onSave }) {
+  const [name,   setName]   = useState(stu.name || '');
+  const [phone,  setPhone]  = useState(stu.phone || '');
+  const [parent, setParent] = useState(stu.parent || '');
+  const [busy,   setBusy]   = useState(false);
+
+  const clean = name.trim();
+  const changed = clean !== (stu.name || '') || phone.trim() !== (stu.phone || '') || parent.trim() !== (stu.parent || '');
+
+  async function save() {
+    if (!clean || busy) return;
+    setBusy(true);
+    await onSave({ name: clean, phone: phone.trim(), parent: parent.trim() });
+    setBusy(false);
+    onClose();
+  }
+
+  return (
+    <Modal onClose={() => { if (!busy) onClose(); }}>
+      <h3 style={{ margin:'0 0 4px', fontSize:16, fontWeight:600, direction:'rtl' }}>עריכת פרטי תלמיד</h3>
+      <p style={{ fontSize:12, color:'var(--color-text-secondary)', margin:'0 0 14px', direction:'rtl' }}>
+        הקוד האישי לא משתנה — הקישור שכבר שלחת ימשיך לעבוד.
+      </p>
+
+      <div style={S.label}>שם</div>
+      <input style={{ ...S.input, marginBottom:10, direction:'rtl' }} value={name} autoFocus
+        onChange={e => setName(e.target.value)} placeholder="שם התלמיד" />
+
+      <div style={S.label}>טלפון</div>
+      <input style={{ ...S.input, marginBottom:10 }} value={phone} inputMode="tel"
+        onChange={e => setPhone(e.target.value)} placeholder="למשל 0501234567" />
+
+      <div style={S.label}>שם ההורה (אופציונלי)</div>
+      <input style={{ ...S.input, marginBottom:6, direction:'rtl' }} value={parent}
+        onChange={e => setParent(e.target.value)} placeholder="שם ההורה" />
+
+      <div style={{ fontSize:11, color:'var(--color-text-secondary)', margin:'0 0 16px', direction:'rtl', lineHeight:1.6 }}>
+        השם והטלפון מופיעים גם בלוח הכיתה של התלמידים האחרים (אם שיתוף הקשר מופעל).
+        השינוי יעודכן שם מיד.
+      </div>
+
+      <div style={{ ...S.row, justifyContent:'space-between' }}>
+        <button style={S.btn('ghost')} disabled={busy} onClick={onClose}>ביטול</button>
+        <button style={{ ...S.btn('primary'), opacity: (!clean || !changed || busy) ? 0.45 : 1 }}
+          disabled={!clean || !changed || busy} onClick={save}>
+          {busy ? 'שומר...' : 'שמור שינויים'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 // ── Add a student directly ───────────────────────────────────────────────────
 // Registration links are for new enquiries; a teacher setting up her studio
 // needs to enter the students she already teaches without filling in the
@@ -1707,7 +1764,7 @@ function AddStudentModal({ onClose, onSave }) {
 
 // ── Teacher: Students ─────────────────────────────────────────────────────────
 function TeacherStudentsTab({ ctx }) {
-  const { students, lessons, TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, baseSlots, deleteStudent, addLesson, addBaseSlot, updLesson, changeToFixed, changeToFlexible } = ctx;
+  const { students, lessons, TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, baseSlots, deleteStudent, addLesson, addBaseSlot, updLesson, updateStudent, changeToFixed, changeToFlexible } = ctx;
   const [selected, setSelected] = useState(null);
   const [deletePrompt, setDeletePrompt] = useState(false);
   const [typeModal, setTypeModal]     = useState(false);   // convert type modal
@@ -1719,6 +1776,7 @@ function TeacherStudentsTab({ ctx }) {
   const [moveSlots, setMoveSlots]     = useState([]);
   const [cancelLessonId, setCancelLessonId] = useState(null);
   const [addModal, setAddModal] = useState(false);
+  const [editModal, setEditModal] = useState(false);
 
   function getStats(sid) {
     const my = lessons.filter(l => l.sid === sid);
@@ -1755,12 +1813,22 @@ function TeacherStudentsTab({ ctx }) {
           </button>
         </div>
         <div style={S.card}>
-          <div style={{ fontSize:18, fontWeight:500, marginBottom:4 }}>{stu.name}</div>
-          <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:10 }}>
-            {stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:8 }}>
+            <div>
+              <div style={{ fontSize:18, fontWeight:500, marginBottom:4 }}>{stu.name}</div>
+              <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:4 }}>
+                {stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}
+              </div>
+              <div style={{ fontSize:12.5, color:'var(--color-text-secondary)', marginBottom:10, direction:'rtl' }}>
+                {stu.phone ? <span style={{ direction:'ltr', unicodeBidi:'embed' }}>{stu.phone}</span> : 'אין טלפון'}
+                {stu.parent ? ` · הורה: ${stu.parent}` : ''}
+              </div>
+            </div>
+            <button style={{ ...S.btn('default'), padding:'5px 12px', fontSize:12, whiteSpace:'nowrap' }}
+              onClick={() => setEditModal(true)}>✏️ ערוך</button>
           </div>
           <button style={{ ...S.btn('info'), width:'100%', marginBottom:12, fontSize:12.5 }}
-            onClick={() => ctx.showCode(stu.name, stu.code)}>
+            onClick={() => ctx.showCode(stu.name, stu.code, stu.phone)}>
             🔗 הצג שוב את הקוד וההודעה לוואטסאפ
           </button>
           <div style={{ fontSize:13, marginBottom:8 }}><span style={{ fontWeight:500 }}>{stats.happened}</span> / 32 שיעורים שהתקיימו</div>
@@ -1971,6 +2039,11 @@ function TeacherStudentsTab({ ctx }) {
         </Modal>
       )}
 
+      {editModal && (
+        <EditStudentModal stu={stu} onClose={() => setEditModal(false)}
+          onSave={patch => updateStudent(stu.id, patch)} />
+      )}
+
       {deletePrompt && (
         <Modal onClose={() => setDeletePrompt(false)}>
           <div style={{ fontSize:16, fontWeight:700, marginBottom:8, direction:'rtl' }}>מחיקת {stu.name}</div>
@@ -2053,14 +2126,28 @@ function TeacherStudentsTab({ ctx }) {
 // ── Approved student: hand over the personal link ────────────────────────────
 // The teacher never dictates the code over the phone — she sends a link that
 // carries it, and the student's device remembers it from then on.
-function ApprovedCodeModal({ info, onClose }) {
+// The message that goes out with a student's personal link. Teachers using this
+// system teach different instruments, so the wording cannot be baked in.
+// {name} and {link} are filled in; anything else is the teacher's own words.
+const DEFAULT_WELCOME = 'היי {name}! נרשמת לשיעורי מוזיקה 🎵\nזה הקישור האישי שלך למערכת — שמור אותו:\n{link}';
+
+function buildWelcome(template, name, link) {
+  const t = (template && template.trim()) ? template : DEFAULT_WELCOME;
+  const filled = t.replace(/\{name\}/g, name || '').replace(/\{link\}/g, link);
+  // A template that forgot the placeholder would send a message with no link
+  // in it at all, which is the one thing this message exists to carry.
+  return filled.includes(link) ? filled : `${filled}\n${link}`;
+}
+
+function ApprovedCodeModal({ info, template, onClose }) {
   const [copied, setCopied] = useState('');
   // Opened from disk rather than from the web, location.origin is "null" and
   // the pathname is a local folder — any link built from it is meaningless to
   // everyone but this computer. Better to say so than to hand out a dead link.
   const isLocal = location.protocol === 'file:';
   const link = `${location.origin}${location.pathname}#s/${info.code}`;
-  const msg  = `היי! נרשמת לשיעורי גיטרה 🎸\nזה הקישור האישי שלך למערכת — שמור אותו:\n${link}`;
+  const msg  = buildWelcome(template, info.name, link);
+  const wa   = waLink(info.phone, msg);
 
   async function copy(text, which) {
     try {
@@ -2102,6 +2189,13 @@ function ApprovedCodeModal({ info, onClose }) {
               </div>
             </div>
 
+            {wa && (
+              <a href={wa} target="_blank" rel="noopener noreferrer"
+                 style={{ ...S.btn('success'), width:'100%', display:'block', textDecoration:'none',
+                          padding:'11px', marginBottom:8, boxSizing:'border-box' }}>
+                💬 שלח בוואטסאפ ל{info.name}
+              </a>
+            )}
             <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => copy(msg, 'msg')}>
               {copied === 'msg' ? '✓ ההודעה הועתקה' : '📋 העתק הודעה מוכנה'}
             </button>
@@ -2306,6 +2400,8 @@ function TeacherSettingsTab({ ctx }) {
   const [studio, setStudio] = useState(teacher?.studioName || '');
   const [name,   setName]   = useState(teacher?.name || '');
   const [phone,  setPhone]  = useState(teacher?.phone || '');
+  const [welcome, setWelcome] = useState(teacher?.welcomeMsg || DEFAULT_WELCOME);
+  const [savedMsg, setSavedMsg] = useState('');
   const [saved,  setSaved]  = useState('');
   const [copied, setCopied] = useState(false);
   const [hName,  setHName]  = useState('');
@@ -2320,6 +2416,11 @@ function TeacherSettingsTab({ ctx }) {
   async function saveProfile() {
     await updateTeacher({ studioName: studio.trim(), name: name.trim(), phone: phone.trim() });
     setSaved('פרטי האולפן נשמרו'); setTimeout(() => setSaved(''), 2500);
+  }
+
+  async function saveWelcome() {
+    await updateTeacher({ welcomeMsg: welcome.trim() || DEFAULT_WELCOME });
+    setSavedMsg('ההודעה נשמרה'); setTimeout(() => setSavedMsg(''), 2500);
   }
 
   async function addHoliday() {
@@ -2361,6 +2462,28 @@ function TeacherSettingsTab({ ctx }) {
         </div>
         <button style={{ ...S.btn('primary'), width:'100%' }} onClick={saveProfile}>שמור</button>
         {saved && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{saved}</div>}
+      </div>
+
+      {/* ── the message that carries a student's link ── */}
+      <div style={{ ...S.card, marginTop:10 }}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>ההודעה שנשלחת עם הקישור</div>
+        <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:10, lineHeight:1.6 }}>
+          זה מה שתעתיק ותשלח לתלמיד חדש יחד עם הקישור האישי שלו. נסח אותה כרצונך —
+          <strong> {'{name}'} </strong> יוחלף בשם התלמיד ו-<strong> {'{link}'} </strong> בקישור שלו.
+        </div>
+        <textarea style={{ ...S.input, minHeight:96, resize:'vertical', marginBottom:8, direction:'rtl', lineHeight:1.6 }}
+          value={welcome} onChange={e => setWelcome(e.target.value)} />
+        <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'10px 12px', marginBottom:10 }}>
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:4 }}>כך זה ייראה</div>
+          <div style={{ fontSize:12.5, whiteSpace:'pre-wrap', wordBreak:'break-word', direction:'rtl', lineHeight:1.6 }}>
+            {buildWelcome(welcome, 'דנה', `${location.origin}${location.pathname}#s/AB12CD`)}
+          </div>
+        </div>
+        <div style={{ ...S.row, gap:8 }}>
+          <button style={{ ...S.btn('primary'), flex:1 }} onClick={saveWelcome}>שמור הודעה</button>
+          <button style={S.btn('ghost')} onClick={() => setWelcome(DEFAULT_WELCOME)}>אפס לברירת מחדל</button>
+        </div>
+        {savedMsg && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{savedMsg}</div>}
       </div>
 
       {/* ── registration link ── */}
@@ -3892,14 +4015,17 @@ function MusicScheduler() {
 
   // Claims are written at booking time and hold a snapshot of the phone, so
   // they need scrubbing too.
-  async function rewriteClaimsFor(sid, phone) {
+  async function rewriteClaimsFor(sid, phone, nameOverride) {
     const held = lessons.filter(l => l.sid === sid && HOLDS.includes(l.status) && l.date >= THIS_WK);
     const stu  = enrichedStudents.find(s => s.id === sid);
+    // The caller may have just renamed this student: their own value wins over
+    // the snapshot, which has not come back yet.
+    const name = nameOverride != null ? nameOverride : (stu?.name || '');
     const byWeek = {};
     held.forEach(l => {
       const ws = wkStart(l.date);
       (byWeek[ws] = byWeek[ws] || {})[claimKey(parseD(l.date).getDay(), l.time)] =
-        { name: stu?.name || '', phone, released: false };
+        { name, phone, released: false };
     });
     await Promise.all(Object.entries(byWeek).map(([ws, slots]) =>
       claimsRef(teacher?.boardKey, ws).set({ slots }, { merge:true }).catch(() => {})));
@@ -3908,6 +4034,22 @@ function MusicScheduler() {
   // Studio name, teacher name, and her own holiday list.
   function updateTeacher(patch) {
     return teacherRef().set(patch, { merge:true }).catch(e => console.error('updateTeacher', e));
+  }
+
+  // Editing a student is not just a document write: their name and phone are
+  // copied into every published board and into the taken-hours map, so those
+  // copies have to be rewritten or the old name lingers on other students'
+  // screens for as long as the week stays published.
+  async function updateStudent(sid, patch) {
+    try {
+      await studentRef(sid).update(patch);
+      const stu = { ...(enrichedStudents.find(s => s.id === sid) || {}), ...patch };
+      await Promise.all([republishBoard(THIS_WK), republishBoard(NEXT_WK)]);
+      await rewriteClaimsFor(sid, stu.shareContact !== false ? (stu.phone || '') : '', stu.name);
+    } catch (e) {
+      console.error('updateStudent', e);
+      alert('עדכון פרטי התלמיד נכשל. בדוק את החיבור ונסה שוב.');
+    }
   }
 
   async function setShareContact(sid, on) {
@@ -3973,7 +4115,7 @@ function MusicScheduler() {
       batch.set(teacherRef(), { slots }, { merge:true });
     }
     await batch.commit();
-    setApprovedInfo({ name: name.trim(), code });
+    setApprovedInfo({ name: name.trim(), code, phone: phone || '' });
   }
 
   async function approveStudent(pendingId, ps, assignType, aDi, aT) {
@@ -4043,7 +4185,7 @@ function MusicScheduler() {
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
-    addStudent, setShareContact, updateTeacher, showCode: (name, code) => setApprovedInfo({ name, code }),
+    addStudent, setShareContact, updateStudent, updateTeacher, showCode: (name, code, phone) => setApprovedInfo({ name, code, phone }),
     teacher, me, logout,
   };
 
