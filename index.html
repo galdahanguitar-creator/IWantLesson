@@ -179,6 +179,58 @@ function projectLessons(slots, students, real, weeks) {
   return out;
 }
 
+// ── Which hours are open, on the teacher's side ───────────────────────────────
+// One answer, used by every teacher surface: both week calendars, the one-off
+// lesson picker and the move-lesson picker.
+//
+// This used to be written out separately in three places, and they disagreed.
+// The current-week version never looked at that week's plan, so hours the
+// teacher had blocked were still offered to her for booking — and an hour a
+// fixed student had cancelled was offered to her students but not to her.
+//
+//   plan            teacher.weekPlans[weekStart] — blocks, extra hours, and
+//                   students removed from that week. Null before a week is
+//                   planned, which simply means "nothing blocked".
+//   minHours        reject hours less than this many hours away (null = any
+//                   hour in the week; 0 = future only).
+//   excludeLessonId the lesson being moved does not count as occupying its own
+//                   hour.
+function openSlotsFor(weekStart, { baseSlots = [], plan = null, lessons = [], students = [], minHours = null, excludeLessonId = null } = {}) {
+  const blocked   = (plan && plan.blockedSlots) || [];
+  const cancelled = (plan && plan.cancelledIds) || [];
+  const seen = new Set();
+  const out  = [];
+
+  const candidates = [
+    ...baseSlots.map(s => ({ di: s.di, t: s.t })),
+    ...(((plan && plan.extraSlots) || [])).map(s => ({ di: s.di, t: s.t })),
+  ];
+
+  candidates.forEach(s => {
+    if (!isValidTime(s.t)) return;
+    const key = `${s.di}_${s.t}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (blocked.some(b => b.di === s.di && b.t === s.t)) return;
+    const date = dateOfDi(weekStart, s.di);
+    if (getHoliday(date)) return;
+    if (minHours != null && hoursUntil(date, s.t) < minHours) return;
+    // An hour is taken by whoever holds a live lesson in it — including the
+    // recurring lesson projected onto a fixed student's own slot. A student the
+    // teacher has removed from this week holds nothing.
+    const taken = lessons.some(l =>
+      l.date === date && l.time === s.t &&
+      ['scheduled','pending_cancel'].includes(l.status) &&
+      l.id !== excludeLessonId &&
+      !cancelled.includes(l.sid) &&
+      students.some(st => st.id === l.sid));
+    if (taken) return;
+    out.push({ date, time: s.t, di: s.di });
+  });
+
+  return out.sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
+}
+
 // ── Shared styles ─────────────────────────────────────────────────────────────
 const S = {
   page:   { direction:'rtl', fontFamily:'var(--font-sans)', padding:'0 0 80px', minHeight:'100vh', background:'var(--color-background-tertiary)' },
@@ -589,61 +641,243 @@ function TeacherView({ ctx }) {
   );
 }
 
-// ── Teacher: This Week ────────────────────────────────────────────────────────
-function TeacherWeekTab({ ctx }) {
-  const { lessons, students, TODAY, THIS_WK } = ctx;
-  const [selected, setSelected] = useState(null);
+// ── Pick a student for an hour ────────────────────────────────────────────────
+// Shared by both week calendars. Students who already have a lesson that week
+// sink to the bottom and say so, because the common mistake is booking a
+// make-up for someone who never missed anything.
+function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy }) {
+  const [q, setQ] = useState('');
+  const ws = wkStart(slot.date);
 
-  const teachingDays = useMemo(() => {
-    const dates = [...new Set(lessons.filter(l => inWk(l.date, THIS_WK)).map(l => l.date))].sort();
-    return dates.map(date => ({ date, di: parseD(date).getDay() }));
-  }, [lessons, THIS_WK]);
+  const rows = useMemo(() => {
+    const term = q.trim();
+    return students
+      .filter(s => !term || (s.name || '').includes(term))
+      .map(s => ({
+        stu: s,
+        week: lessons.filter(l => l.sid === s.id && inWk(l.date, ws)
+                              && ['scheduled','pending_cancel'].includes(l.status))
+                     .sort((a,b) => a.date.localeCompare(b.date)),
+      }))
+      .sort((a,b) => (a.week.length - b.week.length) || (a.stu.name || '').localeCompare(b.stu.name || '', 'he'));
+  }, [students, lessons, ws, q]);
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 style={{ margin:'0 0 4px', fontSize:16, fontWeight:600, direction:'rtl' }}>שיבוץ לשעה פנויה</h3>
+      <div style={{ fontSize:13.5, color:'var(--color-text-secondary)', marginBottom:12, direction:'rtl' }}>
+        יום {DAY_HE[slot.di]} · {dd(slot.date)} · {slot.time}
+      </div>
+      <div style={{ background:'#E6F1FB', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'var(--color-text-info)', direction:'rtl' }}>
+        נוצר <strong>שיעור חד-פעמי</strong> בשעה הזו. המערכת הקבועה של התלמיד לא משתנה.
+      </div>
+      <input style={{ ...S.input, marginBottom:10, direction:'rtl' }} placeholder="חיפוש לפי שם..."
+        value={q} onChange={e => setQ(e.target.value)} />
+      <div style={{ maxHeight:320, overflowY:'auto', marginBottom:8 }}>
+        {rows.length === 0 && (
+          <div style={{ fontSize:13, color:'var(--color-text-secondary)', textAlign:'center', padding:'14px 0' }}>לא נמצא תלמיד</div>
+        )}
+        {rows.map(({ stu, week }) => (
+          <button key={stu.id} disabled={busy}
+            style={{ ...S.btn('default'), width:'100%', textAlign:'right', marginBottom:6, opacity: busy ? 0.5 : 1 }}
+            onClick={() => onAssign(stu)}>
+            <div style={{ fontWeight:600, direction:'rtl' }}>{stu.name}</div>
+            <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.75, direction:'rtl' }}>
+              {week.length === 0
+                ? (stu.type === 'fixed' ? 'תלמיד קבוע · אין לו שיעור השבוע' : 'תלמיד נייד · לא נרשם השבוע')
+                : `כבר יש שיעור השבוע — יום ${DAY_HE[parseD(week[0].date).getDay()]} ${week[0].time}${week.length > 1 ? ` (+${week.length - 1})` : ''}`}
+            </div>
+          </button>
+        ))}
+      </div>
+      <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={onClose}>ביטול</button>
+    </Modal>
+  );
+}
+
+// ── Teacher: This Week ────────────────────────────────────────────────────────
+// Shows the whole week, not only the hours that already have a lesson: free
+// hours can be filled from here, and an hour can be blocked mid-week when
+// something comes up. Both act on the week students are already looking at.
+function TeacherWeekTab({ ctx }) {
+  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, setWeekBlock } = ctx;
+  const [selected, setSelected] = useState(null);   // a calendar item
+  const [assigning, setAssigning] = useState(null); // {date,time,di}
+  const [busy, setBusy] = useState(false);
 
   const weekLessons = useMemo(() => lessons.filter(l => inWk(l.date, THIS_WK)), [lessons, THIS_WK]);
 
-  if (teachingDays.length === 0) return (
-    <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>אין שיעורים מתוכננים השבוע</div>
+  // No `minHours` here: hours that have already passed stay on the calendar,
+  // greyed out, so the week does not visibly rearrange itself as the day goes
+  // on. Booking into one is refused in the modal.
+  const openSlots = useMemo(
+    () => openSlotsFor(THIS_WK, { baseSlots, plan: pubThis, lessons, students }),
+    [THIS_WK, baseSlots, pubThis, lessons, students]
   );
 
-  function renderItem(lesson, top, height) {
-    const stu = students.find(s => s.id === lesson.sid);
-    const isPending = lesson.status === 'pending_cancel';
-    const isCancelled = ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show','moved'].includes(lesson.status);
-    const bg = isPending?'#fef3c7':isCancelled?'#f1f5f9':'#dbeafe';
-    const fg = isPending?'#92400e':isCancelled?'#94a3b8':'#1e40af';
-    const border = isPending?'#fcd34d':isCancelled?'#cbd5e1':'#93c5fd';
+  // One item per hour, so nothing is drawn on top of anything else: a live
+  // lesson wins, then a block, then a free hour, and only then the record of a
+  // lesson that is no longer happening.
+  const items = useMemo(() => {
+    const byKey = new Map();
+    const put = (item) => { const k = `${item.date}_${item.time}`; if (!byKey.has(k)) byKey.set(k, item); };
+
+    weekLessons.filter(l => ['scheduled','pending_cancel'].includes(l.status) && isValidTime(l.time))
+      .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
+
+    (pubThis?.blockedSlots || []).filter(b => isValidTime(b.t)).forEach(b => {
+      const date = dateOfDi(THIS_WK, b.di);
+      put({ id:`blk_${b.di}_${b.t}`, kind:'blocked', date, time:b.t, di:b.di });
+    });
+
+    openSlots.forEach(s => {
+      // Whose hour this was, when it is free because they cancelled.
+      const gave = weekLessons.find(l => l.date===s.date && l.time===s.time
+                                      && ['cancelled_justified','cancelled_unjustified','teacher_cancelled','moved','no_show'].includes(l.status));
+      const stu  = gave ? students.find(x => x.id === gave.sid) : null;
+      put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di, freedBy:stu?.name || null, freedStatus:gave?.status || null });
+    });
+
+    weekLessons.filter(l => !['scheduled','pending_cancel'].includes(l.status) && isValidTime(l.time))
+      .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
+
+    return [...byKey.values()];
+  }, [weekLessons, openSlots, pubThis, THIS_WK, students]);
+
+  // Sunday–Thursday always, plus any other day the week actually uses.
+  const teachingDays = useMemo(() => {
+    const diSet = new Set([0,1,2,3,4, ...items.map(i => i.di)]);
+    return [...diSet].sort().map(di => ({ date: dateOfDi(THIS_WK, di), di }));
+  }, [items, THIS_WK]);
+
+  function renderItem(item, top, height) {
+    let bg, fg, border, label, sub = item.time, faded = false;
+    if (item.kind === 'blocked') {
+      bg='#fee2e2'; fg='#991b1b'; border='#fca5a5'; label='🚫 חסום'; faded = true;
+    } else if (item.kind === 'free') {
+      const past = hoursUntil(item.date, item.time) <= 0;
+      bg = past ? '#f8fafc' : '#ccfbf1'; fg = past ? '#94a3b8' : '#0f766e'; border = past ? '#e2e8f0' : '#5eead4';
+      label = past ? 'חלף' : (item.freedBy ? `פנוי · ${item.freedBy}` : '＋ פנוי');
+      faded = past;
+    } else {
+      const l = item.lesson;
+      const stu = students.find(s => s.id === l.sid);
+      const isPending = l.status === 'pending_cancel';
+      const isCancelled = ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show','moved'].includes(l.status);
+      bg = isPending?'#fef3c7':isCancelled?'#f1f5f9':'#dbeafe';
+      fg = isPending?'#92400e':isCancelled?'#94a3b8':'#1e40af';
+      border = isPending?'#fcd34d':isCancelled?'#cbd5e1':'#93c5fd';
+      label = (stu?.name || 'תלמיד שנמחק') + (isPending ? ' ⏳' : '');
+      faded = isCancelled;
+    }
     return (
-      <div key={lesson.id} onClick={e => { e.stopPropagation(); setSelected(lesson); }} style={{
+      <div key={item.id} onClick={e => { e.stopPropagation(); setSelected(item); }} style={{
         position:'absolute', top, left:2, right:2, height,
-        background:bg, border:`1px solid ${border}`, borderRadius:5,
-        padding:'3px 5px', cursor:'pointer', overflow:'hidden', opacity:isCancelled?0.55:1,
+        background:bg, border:`1px ${item.kind==='free' ? 'dashed' : 'solid'} ${border}`, borderRadius:5,
+        padding:'3px 5px', cursor:'pointer', overflow:'hidden', opacity: faded ? 0.55 : 1,
       }}>
-        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{stu?.name}</div>
-        <div style={{ fontSize:10, color:fg }}>{lesson.time}</div>
-        {isPending && <div style={{ fontSize:9, color:fg }}>⏳</div>}
+        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
+        <div style={{ fontSize:10, color:fg }}>{sub}</div>
       </div>
     );
   }
 
-  const selStu = selected ? students.find(s => s.id === selected.sid) : null;
+  async function assign(stu) {
+    if (busy) return;
+    setBusy(true);
+    const ok = await addLesson(stu.id, assigning.date, assigning.time);
+    setBusy(false);
+    if (ok) setAssigning(null);
+  }
+
+  const selLesson = selected?.kind === 'lesson' ? selected.lesson : null;
+  const selStu    = selLesson ? students.find(s => s.id === selLesson.sid) : null;
+  const selLive   = selLesson && ['scheduled','pending_cancel'].includes(selLesson.status);
+
   return (
     <div>
-      <WeekCalendar days={teachingDays} items={weekLessons} renderItem={renderItem} />
+      <div style={{ ...S.row, gap:12, marginBottom:10, flexWrap:'wrap' }}>
+        {[['#dbeafe','#93c5fd','שיעור'],['#ccfbf1','#5eead4','פנוי — לחץ לשיבוץ'],['#fee2e2','#fca5a5','חסום']].map(([bg,bd,l]) => (
+          <div key={l} style={{ ...S.row, gap:4 }}>
+            <div style={{ width:10, height:10, borderRadius:2, background:bg, border:`1px solid ${bd}` }} />
+            <span style={{ fontSize:11, color:'var(--color-text-secondary)' }}>{l}</span>
+          </div>
+        ))}
+      </div>
+
+      <WeekCalendar days={teachingDays} items={items} renderItem={renderItem} />
+
       {selected && (
         <Modal onClose={() => setSelected(null)}>
-          <div style={{ fontSize:17, fontWeight:600, marginBottom:6, direction:'rtl' }}>{selStu?.name}</div>
-          <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:14, direction:'rtl' }}>
-            יום {DAY_HE[parseD(selected.date).getDay()]} · {dd(selected.date)} · {selected.time}
+          <div style={{ fontSize:17, fontWeight:600, marginBottom:6, direction:'rtl' }}>
+            {selLesson ? (selStu?.name || 'תלמיד שנמחק')
+              : selected.kind === 'blocked' ? '🚫 שעה חסומה' : 'שעה פנויה'}
           </div>
-          <StatusBadge status={selected.status} />
-          {selected.reason && <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'10px 0 0', direction:'rtl' }}>סיבה: {selected.reason}</p>}
-          {selected.status === 'pending_cancel' && (
+          <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:14, direction:'rtl' }}>
+            יום {DAY_HE[selected.di]} · {dd(selected.date)} · {selected.time}
+            <HolBadge date={selected.date} />
+          </div>
+
+          {selLesson && <StatusBadge status={selLesson.status} />}
+          {selLesson?.reason && <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'10px 0 0', direction:'rtl' }}>סיבה: {selLesson.reason}</p>}
+          {selLesson?.status === 'pending_cancel' && (
             <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginTop:12, direction:'rtl' }}>
               <div style={{ fontSize:13, color:'var(--color-text-warning)' }}>בקשת ביטול ממתינה — עבור ללשונית <strong>בקשות</strong></div>
             </div>
           )}
-          <button style={{ ...S.btn('ghost'), marginTop:18, width:'100%' }} onClick={() => setSelected(null)}>סגור</button>
+
+          {selected.kind === 'free' && (
+            <>
+              {selected.freedBy && (
+                <p style={{ fontSize:12.5, color:'var(--color-text-secondary)', margin:'0 0 12px', direction:'rtl' }}>
+                  השעה התפנתה — {selected.freedBy} לא מגיע השבוע.
+                </p>
+              )}
+              {hoursUntil(selected.date, selected.time) <= 0 ? (
+                <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>השעה הזו כבר עברה.</p>
+              ) : (
+                <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }}
+                  onClick={() => { setAssigning({ date:selected.date, time:selected.time, di:selected.di }); setSelected(null); }}>
+                  ＋ שבץ תלמיד לשעה זו
+                </button>
+              )}
+              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
+                onClick={() => { setWeekBlock(THIS_WK, selected.di, selected.time, true); setSelected(null); }}>
+                🚫 חסום את השעה הזו השבוע
+              </button>
+            </>
+          )}
+
+          {selected.kind === 'blocked' && (
+            <>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>
+                השעה חסומה השבוע ומוצגת לתלמידים כחסומה.
+              </p>
+              <button style={{ ...S.btn('success'), width:'100%', marginBottom:8 }}
+                onClick={() => { setWeekBlock(THIS_WK, selected.di, selected.time, false); setSelected(null); }}>
+                ↩️ בטל את החסימה
+              </button>
+            </>
+          )}
+
+          {selLive && (
+            <button style={{ ...S.btn('danger'), width:'100%', margin:'16px 0 0' }}
+              onClick={() => {
+                if (!confirm(`לחסום את יום ${DAY_HE[selected.di]} ${selected.time}? השיעור של ${selStu?.name || 'התלמיד'} יבוטל והשעה תיסגר.`)) return;
+                setWeekBlock(THIS_WK, selected.di, selected.time, true);
+                setSelected(null);
+              }}>
+              🚫 אני לא מגיע — בטל וחסום את השעה
+            </button>
+          )}
+
+          <button style={{ ...S.btn('ghost'), marginTop:14, width:'100%' }} onClick={() => setSelected(null)}>סגור</button>
         </Modal>
+      )}
+
+      {assigning && (
+        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy}
+          onAssign={assign} onClose={() => { if (!busy) setAssigning(null); }} />
       )}
     </div>
   );
@@ -654,7 +888,7 @@ function TeacherWeekTab({ ctx }) {
 // Tap empty area → pre-filled extra slot modal.
 // Block/remove options for ALL slot types including empty slots.
 function TeacherNextWeekTab({ ctx }) {
-  const { students, lessons, NEXT_WK, pubNext, updLesson, pubWeek, baseSlots, addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek, fixOrphanedSlot } = ctx;
+  const { students, lessons, NEXT_WK, pubNext, updLesson, addLesson, pubWeek, baseSlots, addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek, fixOrphanedSlot } = ctx;
   const [cancelledIds, setCancelledIds] = useState(pubNext?.cancelledIds || []);
   const [blockedSlots, setBlockedSlots] = useState(pubNext?.blockedSlots || []);
   const [extraSlots, setExtraSlots]     = useState(pubNext?.extraSlots   || []);
@@ -669,6 +903,8 @@ function TeacherNextWeekTab({ ctx }) {
   const [newSlotDi, setNewSlotDi]       = useState(1);
   const [newSlotT, setNewSlotT]         = useState('13:00');
   const [selected, setSelected]         = useState(null);
+  const [assigning, setAssigning]       = useState(null); // {date,time,di}
+  const [busy, setBusy]                 = useState(false);
 
   // Always show Sunday(0) → Thursday(4), plus any extra-slot days
   const teachingDays = useMemo(() => {
@@ -905,6 +1141,15 @@ function TeacherNextWeekTab({ ctx }) {
             </>
           )}
 
+          {/* Free next week — fill it here rather than going into the student */}
+          {!selected.isBlocked && !selected.flexStu && !selected.isOrphaned &&
+           ((selected.isPermOpen) || (selected.isExtra && selected.isEmpty) || (selected.fixedStu && selected.isCancelled)) && (
+            <button style={{ ...S.btn('primary'), width:'100%', marginBottom:12 }}
+              onClick={() => { setAssigning({ date:selected.date, time:selected.time, di:selected.di }); setSelected(null); }}>
+              ＋ שבץ תלמיד לשעה זו
+            </button>
+          )}
+
           {/* Fixed student, active */}
           {selected.fixedStu && !selected.isCancelled && !selected.isBlocked && !selected.flexStu && (
             <>
@@ -1117,6 +1362,18 @@ function TeacherNextWeekTab({ ctx }) {
           </div>
         </Modal>
       )}
+
+      {assigning && (
+        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy}
+          onAssign={async stu => {
+            if (busy) return;
+            setBusy(true);
+            const ok = await addLesson(stu.id, assigning.date, assigning.time);
+            setBusy(false);
+            if (ok) setAssigning(null);
+          }}
+          onClose={() => { if (!busy) setAssigning(null); }} />
+      )}
     </div>
   );
 }
@@ -1172,48 +1429,25 @@ function SecondSlotManager({ stu, assignSecondSlot, removeSecondSlot }) {
 }
 
 // ── One-time extra lesson adder ───────────────────────────────────────────────
-function OneTimeLessonAdder({ sid, addLesson, lessons, students, THIS_WK, NEXT_WK, pubNext, baseSlots }) {
+function OneTimeLessonAdder({ sid, addLesson, lessons, students, THIS_WK, NEXT_WK, pubThis, pubNext, baseSlots }) {
   const [open,     setOpen]     = useState(false);
   const [weekView, setWeekView] = useState('this');
 
-  const thisWkSlots = React.useMemo(() => {
-    return baseSlots
-      .filter(slot => isValidTime(slot.t) && (slot.sid === null || !students.some(s => s.id === slot.sid)))
-      .map(slot => {
-        let d = parseD(THIS_WK);
-        while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
-        const date = fmtD(d);
-        if (hoursUntil(date, slot.t) <= 0) return null;
-        const taken = lessons.some(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status) && students.some(s => s.id===l.sid));
-        return taken ? null : { date, time:slot.t, di:slot.di };
-      }).filter(Boolean)
-      .sort((a,b) => a.di!==b.di ? a.di-b.di : a.time.localeCompare(b.time));
-  }, [lessons, students, THIS_WK, baseSlots]);
+  // Both weeks go through the same availability function, so an hour blocked
+  // in this week's plan can no longer be offered here.
+  const thisWkSlots = React.useMemo(
+    () => openSlotsFor(THIS_WK, { baseSlots, plan: pubThis, lessons, students, minHours: 0 }),
+    [lessons, students, THIS_WK, baseSlots, pubThis]
+  );
 
-  const nextWkSlots = React.useMemo(() => {
-    if (!pubNext) return [];
-    const available = [
-      ...baseSlots
-        .filter(slot => isValidTime(slot.t) && (slot.sid===null || pubNext.cancelledIds?.includes(slot.sid) || !students.some(s => s.id===slot.sid)))
-        .filter(slot => !pubNext.blockedSlots?.some(b => b.di===slot.di && b.t===slot.t)),
-      ...(pubNext.extraSlots||[])
-        .filter(s => isValidTime(s.t))
-        .map(s => ({ di:s.di, t:s.t, sid:null }))
-        .filter(slot => !pubNext.blockedSlots?.some(b => b.di===slot.di && b.t===slot.t)),
-    ];
-    return available.map(slot => {
-      let d = parseD(NEXT_WK);
-      while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
-      const date = fmtD(d);
-      const taken = lessons.some(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status) && students.some(s => s.id===l.sid));
-      return taken ? null : { date, time:slot.t, di:slot.di };
-    }).filter(Boolean)
-      .sort((a,b) => a.di!==b.di ? a.di-b.di : a.time.localeCompare(b.time));
-  }, [pubNext, lessons, NEXT_WK, baseSlots]);
+  const nextWkSlots = React.useMemo(
+    () => pubNext ? openSlotsFor(NEXT_WK, { baseSlots, plan: pubNext, lessons, students }) : [],
+    [pubNext, lessons, students, NEXT_WK, baseSlots]
+  );
 
-  function book(slot) {
-    addLesson(sid, slot.date, slot.time);
-    setOpen(false);
+  async function book(slot) {
+    const ok = await addLesson(sid, slot.date, slot.time);
+    if (ok) setOpen(false);   // stay open on a clash so another hour can be picked
   }
 
   const activeSlots = weekView === 'this' ? thisWkSlots : nextWkSlots;
@@ -1352,7 +1586,7 @@ function AddStudentModal({ onClose, onSave }) {
 
 // ── Teacher: Students ─────────────────────────────────────────────────────────
 function TeacherStudentsTab({ ctx }) {
-  const { students, lessons, TODAY, THIS_WK, NEXT_WK, pubNext, baseSlots, deleteStudent, addLesson, addBaseSlot, updLesson, changeToFixed, changeToFlexible } = ctx;
+  const { students, lessons, TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, baseSlots, deleteStudent, addLesson, addBaseSlot, updLesson, changeToFixed, changeToFlexible } = ctx;
   const [selected, setSelected] = useState(null);
   const [deletePrompt, setDeletePrompt] = useState(false);
   const [typeModal, setTypeModal]     = useState(false);   // convert type modal
@@ -1376,37 +1610,12 @@ function TeacherStudentsTab({ ctx }) {
   }
 
   function getOpenSlotsForTeacher(lesson) {
-    const slots = [];
-    const allBase = baseSlots.filter(s => isValidTime(s.t) && (s.sid===null || !students.some(st => st.id===s.sid && st.id !== lesson.sid)));
-    // This week
-    allBase.forEach(s => {
-      let d = parseD(THIS_WK);
-      while (d.getDay()!==s.di) d.setDate(d.getDate()+1);
-      const date = fmtD(d);
-      if (date < TODAY) return;
-      if (date===lesson.date && s.t===lesson.time) return;
-      const taken = lessons.some(l => l.date===date && l.time===s.t && ['scheduled','pending_cancel'].includes(l.status) && l.sid!==lesson.sid && students.some(st => st.id===l.sid));
-      if (!taken) slots.push({ date, time:s.t, di:s.di, week:'this' });
-    });
-    // Next week (if published)
-    if (pubNext) {
-      const nwBase = [
-        ...baseSlots.filter(s => isValidTime(s.t) && (s.sid===null || pubNext.cancelledIds?.includes(s.sid)))
-          .filter(s => !pubNext.blockedSlots?.some(b => b.di===s.di && b.t===s.t)),
-        ...(pubNext.extraSlots||[]).filter(s => isValidTime(s.t))
-          .filter(s => !pubNext.blockedSlots?.some(b => b.di===s.di && b.t===s.t))
-          .map(s => ({ di:s.di, t:s.t, sid:null })),
-      ];
-      nwBase.forEach(s => {
-        let d = parseD(NEXT_WK);
-        while (d.getDay()!==s.di) d.setDate(d.getDate()+1);
-        const date = fmtD(d);
-        if (date===lesson.date && s.t===lesson.time) return;
-        const taken = lessons.some(l => l.date===date && l.time===s.t && ['scheduled','pending_cancel'].includes(l.status) && l.sid!==lesson.sid && students.some(st => st.id===l.sid));
-        if (!taken) slots.push({ date, time:s.t, di:s.di, week:'next' });
-      });
-    }
-    return slots.sort((a,b) => a.date!==b.date ? a.date.localeCompare(b.date) : a.time.localeCompare(b.time));
+    const common = { baseSlots, lessons, students, excludeLessonId: lesson.id };
+    return [
+      ...openSlotsFor(THIS_WK, { ...common, plan: pubThis, minHours: 0 })
+        .map(s => ({ ...s, week:'this' })),
+      ...(pubNext ? openSlotsFor(NEXT_WK, { ...common, plan: pubNext }).map(s => ({ ...s, week:'next' })) : []),
+    ].sort((a,b) => a.date!==b.date ? a.date.localeCompare(b.date) : a.time.localeCompare(b.time));
   }
 
   if (selected) {
@@ -1446,7 +1655,7 @@ function TeacherStudentsTab({ ctx }) {
             ))}
           </div>
         </div>
-        <OneTimeLessonAdder sid={selected} addLesson={addLesson} lessons={lessons} students={students} THIS_WK={THIS_WK} NEXT_WK={NEXT_WK} pubNext={pubNext} baseSlots={baseSlots} />
+        <OneTimeLessonAdder sid={selected} addLesson={addLesson} lessons={lessons} students={students} THIS_WK={THIS_WK} NEXT_WK={NEXT_WK} pubThis={pubThis} pubNext={pubNext} baseSlots={baseSlots} />
 
         {/* ── Contact sharing ── */}
         <div style={{ ...S.card, marginTop:10 }}>
@@ -1621,9 +1830,12 @@ function TeacherStudentsTab({ ctx }) {
                     {wkSlots.map(sl => (
                       <button key={`${sl.date}_${sl.time}`}
                         style={{ ...S.btn('default'), marginBottom:5, width:'100%', textAlign:'right' }}
-                        onClick={() => {
-                          updLesson(moveLessonModal.id, { status:'moved' });
-                          addLesson(moveLessonModal.sid, sl.date, sl.time);
+                        onClick={async () => {
+                          // Take the new hour first. If it has just been taken
+                          // by someone else, the student keeps the old one
+                          // rather than being left with nothing.
+                          const ok = await addLesson(moveLessonModal.sid, sl.date, sl.time);
+                          if (ok) await updLesson(moveLessonModal.id, { status:'moved' });
                           setMoveLessonModal(null);
                         }}>
                         יום {DAY_HE[sl.di]} {dd(sl.date)} · {sl.time}
@@ -2107,12 +2319,19 @@ function boardSlotsFor(weekStart, board, claims) {
   return board.slots
     .filter(s => isValidTime(s.t))
     .map(s => {
-      const claim = cl[claimKey(s.di, s.t)] || null;
-      const state = s.state === 'blocked' ? 'blocked' : (claim || s.state === 'taken' ? 'taken' : 'free');
+      const claim    = cl[claimKey(s.di, s.t)] || null;
+      // A `released` marker is the live word that the hour was handed back —
+      // it outranks the `taken` state frozen into the board at publish time.
+      const released = !!(claim && claim.released);
+      const held     = !!claim && !released;
+      let state = 'free';
+      if (s.state === 'blocked')            state = 'blocked';
+      else if (held)                        state = 'taken';
+      else if (!claim && s.state==='taken') state = 'taken';
       return {
         di: s.di, t: s.t, date: dateOfDi(weekStart, s.di), state,
-        name:  claim ? claim.name  : (s.name  || null),
-        phone: claim ? (claim.phone || '') : (s.phone || ''),
+        name:  held ? claim.name  : (state === 'taken' ? (s.name  || null) : null),
+        phone: held ? (claim.phone || '') : (state === 'taken' ? (s.phone || '') : ''),
       };
     });
 }
@@ -2120,6 +2339,7 @@ function boardSlotsFor(weekStart, board, claims) {
 function freeSlotsFor(weekStart, board, claims, { after } = {}) {
   return boardSlotsFor(weekStart, board, claims)
     .filter(s => s.state === 'free')
+    .filter(s => !getHoliday(s.date))
     .filter(s => !after || hoursUntil(s.date, s.t) >= after)
     .map(s => ({ date:s.date, time:s.t, di:s.di }))
     .sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
@@ -2171,15 +2391,18 @@ function StudentMineTab({ ctx }) {
     setCancelModal(null); setReason('');
   }
 
-  function submitMove(oldLesson, newSlot) {
-    updLesson(oldLesson.id, { status:'moved' });
-    addLesson(me.id, newSlot.date, newSlot.time);
+  // Take the new hour before giving up the old one: if someone claimed it a
+  // moment earlier, the student is told, and keeps the lesson they had.
+  async function submitMove(oldLesson, newSlot) {
+    const ok = await addLesson(me.id, newSlot.date, newSlot.time);
+    if (!ok) return;
+    await updLesson(oldLesson.id, { status:'moved' });
     setMoveModal(null);
     setMoveSuccess(`✓ השיעור הועבר ליום ${DAY_HE[newSlot.di]} ${dd(newSlot.date)} · ${newSlot.time}`);
     setTimeout(() => setMoveSuccess(null), 5000);
   }
 
-  function bookSlot(slot) { addLesson(me.id, slot.date, slot.time); }
+  function bookSlot(slot) { return addLesson(me.id, slot.date, slot.time); }
 
   const thisWkLesson  = upcoming.find(l => inWk(l.date, THIS_WK) && !l.id.endsWith('_2nd'));
   const nextWkLesson  = upcoming.find(l => inWk(l.date, NEXT_WK) && !l.id.endsWith('_2nd'));
@@ -2391,10 +2614,13 @@ function LessonCard({ lesson, onCancel, onMove, showActions }) {
 
 // ── Student: Class Board — calendar built from the published board ────────────
 function StudentBoardTab({ ctx }) {
-  const { me, lessons, THIS_WK, NEXT_WK, boards, claims, pubNext } = ctx;
+  const { me, lessons, THIS_WK, NEXT_WK, boards, claims, pubNext, updLesson, addLesson } = ctx;
   const [weekView, setWeekView] = useState('this');
 
   const [contact, setContact] = useState(null);
+  const [pick,    setPick]    = useState(null);   // free hour the student tapped
+  const [busy,    setBusy]    = useState(false);
+  const [toast,   setToast]   = useState('');
   const activeWk = weekView==='this' ? THIS_WK : NEXT_WK;
   const board    = boards[activeWk] || null;
   const cl       = claims[activeWk] || {};
@@ -2412,30 +2638,63 @@ function StudentBoardTab({ ctx }) {
            .map(l => `${l.date}_${l.time}`)
   ), [lessons, me.id]);
 
+  // An hour is bookable only if it is genuinely free, not on a holiday, and at
+  // least two hours away — the same rule the "change hour" button already used,
+  // now that the board itself is what people tap.
+  const OPEN_MIN_HOURS = 2;
+  const isBookable = s => s.state === 'free' && !getHoliday(s.date) && hoursUntil(s.date, s.t) >= OPEN_MIN_HOURS;
+
   const calItems = useMemo(() => slots.map(s => ({
     id: `${s.date}_${s.t}`, date: s.date, time: s.t, di: s.di,
     state: s.state, name: s.name, phone: s.phone,
     mine: mineKeys.has(`${s.date}_${s.t}`),
+    bookable: isBookable(s),
   })), [slots, mineKeys]);
+
+  // Lessons of mine in the week on screen that could move into a tapped hour.
+  // A lesson already awaiting a cancellation decision is not one of them, and
+  // neither is one about to start.
+  const movable = useMemo(() => lessons
+    .filter(l => l.sid === me.id && l.status === 'scheduled' && inWk(l.date, activeWk)
+              && hoursUntil(l.date, l.time) >= OPEN_MIN_HOURS)
+    .sort((a,b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)),
+    [lessons, me.id, activeWk]);
+
+  async function take(fromLesson) {
+    if (busy || !pick) return;
+    setBusy(true);
+    // The new hour is secured first; only then is the old one given up, so a
+    // hour taken a second earlier by someone else leaves the lesson where it is.
+    const ok = await addLesson(me.id, pick.date, pick.time);
+    if (ok && fromLesson) await updLesson(fromLesson.id, { status:'moved' });
+    setBusy(false);
+    if (ok) {
+      setToast(`✓ ${fromLesson ? 'השיעור הועבר ל' : 'נרשמת ל'}יום ${DAY_HE[pick.di]} ${dd(pick.date)} · ${pick.time}`);
+      setPick(null);
+      setTimeout(() => setToast(''), 5000);
+    }
+  }
 
   function renderItem(item, top, height) {
     let bg, border, fg, label;
     if (item.state === 'blocked')    { bg='#fee2e2'; border='#fca5a5'; fg='#991b1b'; label='🚫 חסום'; }
-    else if (item.state === 'free')  { bg='#f0fdf4'; border='#86efac'; fg='#166534'; label='פנוי'; }
+    else if (item.state === 'free')  { bg='#f0fdf4'; border='#86efac'; fg='#166534'; label=item.bookable ? '＋ פנוי' : 'פנוי'; }
     else if (item.mine)              { bg='#fef9c3'; border='#fde68a'; fg='#78350f'; label='⭐ השיעור שלי'; }
     else                             { bg='#dbeafe'; border='#93c5fd'; fg='#1e40af'; label=item.name || 'תפוס'; }
-    const tappable = item.state === 'taken' && !item.mine && !!item.phone;
+    const contactable = item.state === 'taken' && !item.mine && !!item.phone;
+    const tappable    = contactable || item.bookable;
     return (
       <div key={item.id}
-        onClick={tappable ? (e => { e.stopPropagation(); setContact(item); }) : undefined}
+        onClick={tappable ? (e => { e.stopPropagation(); if (item.bookable) setPick(item); else setContact(item); }) : undefined}
         style={{
           position:'absolute', top, left:2, right:2, height,
           background:bg, border:`1.5px ${item.state==='free'?'dashed':'solid'} ${border}`,
           borderRadius:5, padding:'3px 5px', overflow:'hidden',
           cursor: tappable ? 'pointer' : 'default',
+          opacity: item.state === 'free' && !item.bookable ? 0.5 : 1,
         }}>
         <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>
-          {label}{tappable ? ' 💬' : ''}
+          {label}{contactable ? ' 💬' : ''}
         </div>
         <div style={{ fontSize:10, color:fg }}>{item.time}</div>
       </div>
@@ -2473,11 +2732,75 @@ function StudentBoardTab({ ctx }) {
         </div>
       ) : (
         <>
-          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, textAlign:'center' }}>
-            שעה עם 💬 — אפשר ללחוץ וליצור קשר לתיאום החלפה
+          <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, textAlign:'center', lineHeight:1.7 }}>
+            שעה עם ＋ — לחיצה כדי להעביר לשם את השיעור שלך<br/>
+            שעה עם 💬 — לחיצה כדי ליצור קשר לתיאום החלפה
           </div>
           <WeekCalendar days={teachingDays} items={calItems} renderItem={renderItem} />
         </>
+      )}
+
+      {toast && (
+        <div style={{ position:'fixed', bottom:30, left:'50%', transform:'translateX(-50%)', zIndex:300,
+          background:'#166534', color:'#fff', borderRadius:12, padding:'12px 20px',
+          fontSize:14, fontWeight:500, boxShadow:'0 4px 16px rgba(0,0,0,0.25)',
+          maxWidth:320, textAlign:'center', direction:'rtl' }}>
+          {toast}
+        </div>
+      )}
+
+      {/* Tapping a free hour is one tap away from changing a real lesson, so it
+          always asks first — and says exactly which lesson would move. */}
+      {pick && (
+        <Modal onClose={() => { if (!busy) setPick(null); }}>
+          <div style={{ direction:'rtl' }}>
+            <h3 style={{ margin:'0 0 4px', fontSize:16, fontWeight:600 }}>שעה פנויה</h3>
+            <div style={{ fontSize:14, color:'var(--color-text-secondary)', marginBottom:14 }}>
+              יום {DAY_HE[pick.di]} · {dd(pick.date)} · {pick.time}
+            </div>
+
+            {movable.length === 0 ? (
+              <>
+                <p style={{ fontSize:13.5, color:'var(--color-text-secondary)', margin:'0 0 14px', lineHeight:1.6 }}>
+                  אין לך שיעור שאפשר להעביר לשבוע הזה. תוכל להירשם לשעה הזו כשיעור נוסף.
+                </p>
+                {lessons.some(l => l.sid === me.id && l.status === 'pending_cancel' && inWk(l.date, activeWk)) && (
+                  <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginBottom:12 }}>
+                    <div style={{ fontSize:12.5, color:'var(--color-text-warning)' }}>
+                      יש לך בקשת ביטול שממתינה למורה השבוע. אם תירשם עכשיו יהיו לך שני שיעורים.
+                    </div>
+                  </div>
+                )}
+                <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8, opacity:busy?0.5:1 }}
+                  disabled={busy} onClick={() => take(null)}>
+                  {busy ? 'רושם...' : '✅ הירשם לשעה הזו'}
+                </button>
+              </>
+            ) : (
+              <>
+                <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 10px' }}>
+                  {movable.length === 1 ? 'להעביר לכאן את השיעור שלך?' : 'איזה שיעור להעביר לשעה הזו?'}
+                </p>
+                {movable.map(l => (
+                  <button key={l.id} disabled={busy}
+                    style={{ ...S.btn('primary'), width:'100%', textAlign:'right', marginBottom:8, opacity:busy?0.5:1 }}
+                    onClick={() => take(l)}>
+                    <div style={{ fontWeight:600 }}>
+                      {busy ? 'מעביר...' : `יום ${DAY_HE[parseD(l.date).getDay()]} ${dd(l.date)} · ${l.time}`}
+                    </div>
+                    <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.85 }}>
+                      ← יום {DAY_HE[pick.di]} {dd(pick.date)} · {pick.time}
+                    </div>
+                  </button>
+                ))}
+                <p style={{ fontSize:11.5, color:'var(--color-text-secondary)', margin:'0 0 12px', lineHeight:1.6 }}>
+                  השעה הישנה שלך תתפנה ותהיה פתוחה לתלמידים אחרים.
+                </p>
+              </>
+            )}
+            <button style={{ ...S.btn('ghost'), width:'100%' }} disabled={busy} onClick={() => setPick(null)}>ביטול</button>
+          </div>
+        </Modal>
       )}
 
       {contact && (
@@ -2887,17 +3210,38 @@ function MusicScheduler() {
 
   const boardKey = isTeacher ? teacher?.boardKey : me?.boardKey;
 
-  function setClaim(date, time, stu) {
+  // Taking an hour is a lock, not a note. Two students tapping the same free
+  // hour a second apart used to both get it, with only one name showing on the
+  // board; now the second one is told the hour is gone. The claims map is the
+  // lock because it is the one document every reader already watches.
+  //
+  // Throws 'taken' if someone got there first, 'unpublished' if the week has no
+  // claims document yet — students may amend that document but never create it.
+  async function claimSlot(date, time, stu) {
+    const ref   = claimsRef(boardKey, wkStart(date));
+    const key   = claimKey(parseD(date).getDay(), time);
     const share = stu?.shareContact !== false;
-    return claimsRef(boardKey, wkStart(date)).set({
-      slots: { [claimKey(parseD(date).getDay(), time)]: {
-        name: stu?.name || '', phone: share ? (stu?.phone || '') : '',
-      } },
-    }, { merge: true }).catch(e => console.error('setClaim', e));
+    const mine  = { name: stu?.name || '', phone: share ? (stu?.phone || '') : '' };
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) {
+        if (!isTeacher) throw new Error('unpublished');
+        tx.set(ref, { teacherId: teacherUid, weekStart: wkStart(date), slots: { [key]: mine } }, { merge:true });
+        return;
+      }
+      const cur = (snap.data().slots || {})[key];
+      if (cur && !cur.released) throw new Error('taken');
+      tx.set(ref, { slots: { [key]: mine } }, { merge:true });
+    });
   }
+
+  // Handing an hour back writes a marker rather than deleting the key. The
+  // published board carries `state:'taken'` for every fixed student's hour, and
+  // a deleted claim left that standing — so a cancelled lesson never actually
+  // reopened its hour to anyone. The marker overrides the board.
   function releaseClaim(date, time) {
     return claimsRef(boardKey, wkStart(date))
-      .update({ [`slots.${claimKey(parseD(date).getDay(), time)}`]: firebase.firestore.FieldValue.delete() })
+      .update({ [`slots.${claimKey(parseD(date).getDay(), time)}`]: { released: true } })
       .catch(e => {       // the week may simply have no claims document yet
         if (e?.code !== 'not-found') console.error('releaseClaim', e);
       });
@@ -2928,6 +3272,8 @@ function MusicScheduler() {
   const SETTLED = ['completed','cancelled_justified','cancelled_unjustified',
                    'teacher_cancelled','no_show','moved'];
 
+  // Returns true only if the hour was actually secured — callers that are
+  // moving a lesson must not give up the old hour before this succeeds.
   async function addLesson(sid, date, time) {
     const tid  = isTeacher ? teacherUid : me?.teacherId;
     const base = lessonId(sid, date, time);
@@ -2936,15 +3282,30 @@ function MusicScheduler() {
     const id   = (prev && SETTLED.includes(prev.status))
       ? `${base}_r${Math.random().toString(36).slice(2, 6)}`
       : base;
+
+    // The lock comes first. Writing the lesson and only then claiming the hour
+    // would hand the same hour to two students whenever they overlap.
+    try {
+      await claimSlot(date, time, stu);
+    } catch (e) {
+      if (e?.message === 'taken') { alert('השעה הזו נתפסה זה עתה. בחר שעה אחרת.'); return false; }
+      if (e?.message === 'unpublished') { alert('השבוע הזה עדיין לא פורסם. פנה למורה.'); return false; }
+      console.error('claimSlot', e);
+      alert('ההרשמה לשעה נכשלה. רענן את הדף ונסה שוב.');
+      return false;
+    }
+
     try {
       await lessonRef(sid, id).set({
         id, teacherId: tid, sid, date, time,
         status: 'scheduled', reason: '', cancelledAt: null,
       }, { merge: true });
-      await setClaim(date, time, stu);
+      return true;
     } catch (e) {
       console.error('addLesson', e);
+      await releaseClaim(date, time);   // never leave the hour locked for nobody
       alert('ההרשמה לשעה נכשלה. רענן את הדף ונסה שוב.');
+      return false;
     }
   }
 
@@ -2998,7 +3359,7 @@ function MusicScheduler() {
           id:l.id, teacherId:teacherUid, sid:l.sid, date:l.date, time:l.time,
           status:'teacher_cancelled', reason:l.reason || '',
         }, { merge:true });
-        freed[claimKey(di, l.time)] = firebase.firestore.FieldValue.delete();
+        freed[claimKey(di, l.time)] = { released: true };
       });
 
       // The board is what students receive: slot states and names only —
@@ -3083,7 +3444,7 @@ function MusicScheduler() {
       held.forEach(l => {
         const ws = wkStart(l.date);
         (byWeek[ws] = byWeek[ws] || {})[`slots.${claimKey(parseD(l.date).getDay(), l.time)}`] =
-          firebase.firestore.FieldValue.delete();
+          { released: true };
       });
       await Promise.all(Object.entries(byWeek).map(([ws, patch]) =>
         claimsRef(teacher?.boardKey, ws).update(patch).catch(() => {})));
@@ -3102,12 +3463,47 @@ function MusicScheduler() {
 
   // Rewrite an already-published week from current data. Used whenever
   // something changed that the published board would otherwise keep showing.
-  async function republishBoard(ws) {
-    const plan = teacher?.weekPlans?.[ws];
+  // `planOverride` matters when the plan was just written: the teacher document
+  // snapshot has not come back yet, so reading it from state would republish
+  // the board from the version without the change.
+  async function republishBoard(ws, planOverride) {
+    const plan = planOverride || teacher?.weekPlans?.[ws];
     if (!plan || !teacher?.boardKey) return;
     await boardRef(teacher.boardKey, ws).set({
+      teacherId: teacherUid, weekStart: ws, note: plan.note || '',
+      studioName: teacher?.studioName || '',
       slots: buildBoardSlots(plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
+      holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
+      publishedAt: new Date().toISOString(),
     }, { merge:true }).catch(e => console.error('republishBoard', e));
+  }
+
+  // ── blocking an hour in a week that is already out ────────────────────────
+  // Planning happens a week ahead, but life does not. This edits the plan of
+  // any week in place and rewrites the board students are already looking at,
+  // so "I am not here on Tuesday" takes effect the moment it is tapped.
+  async function setWeekBlock(ws, di, t, on) {
+    try {
+      const published = !!teacher?.weekPlans?.[ws];
+      const cur  = teacher?.weekPlans?.[ws] || { weekStart:ws, cancelledIds:[], blockedSlots:[], extraSlots:[], note:'' };
+      const rest = (cur.blockedSlots || []).filter(b => !(b.di === di && b.t === t));
+      const plan = { ...cur, weekStart: ws, blockedSlots: on ? [...rest, { di, t }] : rest };
+
+      await teacherRef().set({ weekPlans: { [ws]: plan } }, { merge:true });
+
+      if (on) {
+        // Whoever held that hour has to be told, and the hour handed back.
+        const date = dateOfDi(ws, di);
+        const hit  = lessons.filter(l => l.date === date && l.time === t && HOLDS.includes(l.status));
+        for (const l of hit) await updLesson(l.id, { status:'teacher_cancelled' });
+      }
+      // A week that was never published stays unpublished — blocking an hour
+      // must not push a board out before the teacher meant to.
+      if (published) await republishBoard(ws, plan);
+    } catch (e) {
+      console.error('setWeekBlock', e);
+      alert('עדכון החסימה נכשל. בדוק את החיבור ונסה שוב.');
+    }
   }
 
   // Claims are written at booking time and hold a snapshot of the phone, so
@@ -3248,9 +3644,16 @@ function MusicScheduler() {
     ? (teacher?.weekPlans?.[NEXT_WK] || null)
     : (boards[NEXT_WK] || null);
 
+  // The current week's plan — where its blocks, extra hours and removed
+  // students live. Every teacher screen that offers an hour for booking has to
+  // read it, or it offers hours the teacher has already blocked.
+  const pubThis = isTeacher
+    ? (teacher?.weekPlans?.[THIS_WK] || null)
+    : (boards[THIS_WK] || null);
+
   const ctx = {
     students: enrichedStudents, pendingStudents, lessons,
-    TODAY, THIS_WK, NEXT_WK, pubNext, boards, claims,
+    TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, boards, claims, setWeekBlock,
     updLesson, addLesson, pubWeek, approveStudent, rejectStudent, deleteStudent,
     approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
     baseSlots: teacher?.slots || [],
