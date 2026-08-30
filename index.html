@@ -298,12 +298,31 @@ function Modal({ children, onClose }) {
 // renderItem(item, topPx, heightPx) → absolutely-positioned JSX
 // onColumnClick(di, date, timeStr) — optional, fires on empty column click
 function WeekCalendar({ days, items, renderItem, onColumnClick }) {
-  const MIN_H = 8, MAX_H = 16;
   const PX_MIN = 1.55;
-  const GRID_H = (MAX_H - MIN_H) * 60 * PX_MIN;  // 744px
   const TIME_W = 36;
   const COL_MIN = 66; // min column width — allows 5 cols on a 375px screen
   const ITEM_H = 45 * PX_MIN - 2;
+
+  // The day shown by default. The window then widens to fit anything outside
+  // it, so an early-morning or late-afternoon hour is never drawn off the grid
+  // where it cannot be seen or tapped. Hours are allowed from 07:00 to 22:00,
+  // which is the range the rest of the app accepts.
+  const DEF_MIN = 8, DEF_MAX = 18;
+  const [MIN_H, MAX_H] = useMemo(() => {
+    let lo = DEF_MIN, hi = DEF_MAX;
+    items.forEach(it => {
+      const [h, m] = String(it.time || '').split(':').map(Number);
+      if (!Number.isFinite(h)) return;
+      const start = h + (m || 0) / 60;
+      lo = Math.min(lo, Math.floor(start));
+      hi = Math.max(hi, Math.ceil(start));   // the 45 minutes after it fit in the slack below
+    });
+    return [Math.max(7, lo), Math.min(22, hi)];
+  }, [items]);
+
+  // One lesson-height of slack at the bottom, so an item starting on the last
+  // hour line is not clipped by the container.
+  const GRID_H = (MAX_H - MIN_H) * 60 * PX_MIN + ITEM_H;
 
   const hours = Array.from({ length: MAX_H - MIN_H + 1 }, (_, i) => MIN_H + i);
 
@@ -700,10 +719,32 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
 // hours can be filled from here, and an hour can be blocked mid-week when
 // something comes up. Both act on the week students are already looking at.
 function TeacherWeekTab({ ctx }) {
-  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, setWeekBlock } = ctx;
+  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, setWeekBlock, setWeekExtra } = ctx;
   const [selected, setSelected] = useState(null);   // a calendar item
   const [assigning, setAssigning] = useState(null); // {date,time,di}
   const [busy, setBusy] = useState(false);
+  const [addingExtra, setAddingExtra] = useState(false);
+  const [exDi, setExDi] = useState(parseD(TODAY).getDay());
+  const [exT,  setExT]  = useState('09:00');
+
+  // Which of this week's open hours are one-off additions rather than part of
+  // the standing schedule — they get their own colour and can be taken back.
+  const extraKeys = useMemo(
+    () => new Set((pubThis?.extraSlots || []).map(e => `${e.di}_${e.t}`)),
+    [pubThis]
+  );
+
+  function endTime(t) {
+    const [h,m] = t.split(':').map(Number);
+    const e = h*60 + m + 45;
+    return `${String(Math.floor(e/60)).padStart(2,'0')}:${String(e%60).padStart(2,'0')}`;
+  }
+
+  function saveExtra() {
+    if (!isValidTime(exT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
+    setWeekExtra(THIS_WK, exDi, exT, true);
+    setAddingExtra(false);
+  }
 
   const weekLessons = useMemo(() => lessons.filter(l => inWk(l.date, THIS_WK)), [lessons, THIS_WK]);
 
@@ -735,14 +776,16 @@ function TeacherWeekTab({ ctx }) {
       const gave = weekLessons.find(l => l.date===s.date && l.time===s.time
                                       && ['cancelled_justified','cancelled_unjustified','teacher_cancelled','moved','no_show'].includes(l.status));
       const stu  = gave ? students.find(x => x.id === gave.sid) : null;
-      put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di, freedBy:stu?.name || null, freedStatus:gave?.status || null });
+      put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di,
+            isExtra: extraKeys.has(`${s.di}_${s.time}`),
+            freedBy:stu?.name || null, freedStatus:gave?.status || null });
     });
 
     weekLessons.filter(l => !['scheduled','pending_cancel'].includes(l.status) && isValidTime(l.time))
       .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
 
     return [...byKey.values()];
-  }, [weekLessons, openSlots, pubThis, THIS_WK, students]);
+  }, [weekLessons, openSlots, pubThis, THIS_WK, students, extraKeys]);
 
   // Sunday–Thursday always, plus any other day the week actually uses.
   const teachingDays = useMemo(() => {
@@ -756,9 +799,10 @@ function TeacherWeekTab({ ctx }) {
       bg='#fee2e2'; fg='#991b1b'; border='#fca5a5'; label='🚫 חסום'; faded = true;
     } else if (item.kind === 'free') {
       const past = hoursUntil(item.date, item.time) <= 0;
-      bg = past ? '#f8fafc' : '#ccfbf1'; fg = past ? '#94a3b8' : '#0f766e'; border = past ? '#e2e8f0' : '#5eead4';
-      label = past ? 'חלף' : (item.freedBy ? `פנוי · ${item.freedBy}` : '＋ פנוי');
-      faded = past;
+      if (past)            { bg='#f8fafc'; fg='#94a3b8'; border='#e2e8f0'; label='חלף'; faded = true; }
+      else if (item.isExtra) { bg='#fef9c3'; fg='#78350f'; border='#fde68a'; label='⭐ חריגה'; }
+      else                 { bg='#ccfbf1'; fg='#0f766e'; border='#5eead4';
+                             label = item.freedBy ? `פנוי · ${item.freedBy}` : '＋ פנוי'; }
     } else {
       const l = item.lesson;
       const stu = students.find(s => s.id === l.sid);
@@ -796,16 +840,26 @@ function TeacherWeekTab({ ctx }) {
 
   return (
     <div>
-      <div style={{ ...S.row, gap:12, marginBottom:10, flexWrap:'wrap' }}>
-        {[['#dbeafe','#93c5fd','שיעור'],['#ccfbf1','#5eead4','פנוי — לחץ לשיבוץ'],['#fee2e2','#fca5a5','חסום']].map(([bg,bd,l]) => (
-          <div key={l} style={{ ...S.row, gap:4 }}>
-            <div style={{ width:10, height:10, borderRadius:2, background:bg, border:`1px solid ${bd}` }} />
-            <span style={{ fontSize:11, color:'var(--color-text-secondary)' }}>{l}</span>
-          </div>
-        ))}
+      <div style={{ ...S.row, justifyContent:'space-between', marginBottom:10, flexWrap:'wrap', gap:8 }}>
+        <div style={{ ...S.row, gap:12, flexWrap:'wrap' }}>
+          {[['#dbeafe','#93c5fd','שיעור'],['#ccfbf1','#5eead4','פנוי'],['#fef9c3','#fde68a','חריגה'],['#fee2e2','#fca5a5','חסום']].map(([bg,bd,l]) => (
+            <div key={l} style={{ ...S.row, gap:4 }}>
+              <div style={{ width:10, height:10, borderRadius:2, background:bg, border:`1px solid ${bd}` }} />
+              <span style={{ fontSize:11, color:'var(--color-text-secondary)' }}>{l}</span>
+            </div>
+          ))}
+        </div>
+        <button style={{ ...S.btn('warning'), padding:'6px 12px', fontSize:12 }}
+          onClick={() => { setExDi(parseD(TODAY).getDay()); setExT('09:00'); setAddingExtra(true); }}>
+          ⭐ הוסף שעה חריגה השבוע
+        </button>
+      </div>
+      <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, textAlign:'center' }}>
+        לחיצה על שעה פנויה — שיבוץ תלמיד · לחיצה על שטח ריק בלוח — הוספת שעה חריגה
       </div>
 
-      <WeekCalendar days={teachingDays} items={items} renderItem={renderItem} />
+      <WeekCalendar days={teachingDays} items={items} renderItem={renderItem}
+        onColumnClick={(di, date, timeStr) => { setExDi(di); setExT(timeStr); setAddingExtra(true); }} />
 
       {selected && (
         <Modal onClose={() => setSelected(null)}>
@@ -841,10 +895,17 @@ function TeacherWeekTab({ ctx }) {
                   ＋ שבץ תלמיד לשעה זו
                 </button>
               )}
-              <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
-                onClick={() => { setWeekBlock(THIS_WK, selected.di, selected.time, true); setSelected(null); }}>
-                🚫 חסום את השעה הזו השבוע
-              </button>
+              {selected.isExtra ? (
+                <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
+                  onClick={() => { setWeekExtra(THIS_WK, selected.di, selected.time, false); setSelected(null); }}>
+                  🗑 הסר את השעה החריגה
+                </button>
+              ) : (
+                <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }}
+                  onClick={() => { setWeekBlock(THIS_WK, selected.di, selected.time, true); setSelected(null); }}>
+                  🚫 חסום את השעה הזו השבוע
+                </button>
+              )}
             </>
           )}
 
@@ -878,6 +939,35 @@ function TeacherWeekTab({ ctx }) {
       {assigning && (
         <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy}
           onAssign={assign} onClose={() => { if (!busy) setAssigning(null); }} />
+      )}
+
+      {addingExtra && (
+        <Modal onClose={() => setAddingExtra(false)}>
+          <h3 style={{ margin:'0 0 6px', fontSize:16, fontWeight:600, direction:'rtl' }}>⭐ שעה חריגה השבוע</h3>
+          <p style={{ fontSize:12.5, color:'var(--color-text-secondary)', margin:'0 0 14px', direction:'rtl', lineHeight:1.6 }}>
+            שעה חד-פעמית לשבוע הזה בלבד. היא תופיע בלוח כשעה פנויה — גם אצלך לשיבוץ וגם אצל התלמידים.
+          </p>
+          <div style={{ marginBottom:12 }}>
+            <div style={S.label}>יום</div>
+            <select style={S.input} value={exDi} onChange={e => setExDi(Number(e.target.value))}>
+              {[0,1,2,3,4,5].map(di => (
+                <option key={di} value={di}>יום {DAY_HE[di]} · {dd(dateOfDi(THIS_WK, di))}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ marginBottom:8 }}>
+            <div style={S.label}>שעת התחלה (צעדים של 5 דקות)</div>
+            <input type="time" step="300" style={S.input} value={exT} onChange={e => setExT(e.target.value)} />
+          </div>
+          <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
+            שיעור: {exT} – {endTime(exT)} (45 דקות)
+            {hoursUntil(dateOfDi(THIS_WK, exDi), exT) <= 0 && <span style={{ color:'var(--color-text-warning)' }}> · השעה הזו כבר עברה</span>}
+          </div>
+          <div style={{ ...S.row, justifyContent:'space-between' }}>
+            <button style={S.btn('ghost')} onClick={() => setAddingExtra(false)}>ביטול</button>
+            <button style={S.btn('primary')} onClick={saveExtra}>הוסף שעה</button>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -2322,7 +2412,7 @@ function boardSlotsFor(weekStart, board, claims) {
       const claim    = cl[claimKey(s.di, s.t)] || null;
       // A `released` marker is the live word that the hour was handed back —
       // it outranks the `taken` state frozen into the board at publish time.
-      const released = !!(claim && claim.released);
+      const released = !!(claim && claim.released === true);
       const held     = !!claim && !released;
       let state = 'free';
       if (s.state === 'blocked')            state = 'blocked';
@@ -3208,6 +3298,11 @@ function MusicScheduler() {
   // and nothing else — never the code that identifies the student.
   const HOLDS = ['scheduled', 'pending_cancel'];
 
+  // What an hour looks like once it has been handed back. Every field a claim
+  // can carry is written, because these maps are always merged: a partial
+  // tombstone would leave the previous occupant's name lying underneath it.
+  const RELEASED = { name: '', phone: '', released: true };
+
   const boardKey = isTeacher ? teacher?.boardKey : me?.boardKey;
 
   // Taking an hour is a lock, not a note. Two students tapping the same free
@@ -3221,7 +3316,12 @@ function MusicScheduler() {
     const ref   = claimsRef(boardKey, wkStart(date));
     const key   = claimKey(parseD(date).getDay(), time);
     const share = stu?.shareContact !== false;
-    const mine  = { name: stu?.name || '', phone: share ? (stu?.phone || '') : '' };
+    // `released:false` is not decoration. Every write to this map is a merge,
+    // so a claim that omitted the flag would leave an older `released:true`
+    // standing underneath it — the hour would read as free with a name on it,
+    // and the student would disappear from the board the moment they moved
+    // back into an hour they had once left.
+    const mine  = { name: stu?.name || '', phone: share ? (stu?.phone || '') : '', released: false };
     await db.runTransaction(async tx => {
       const snap = await tx.get(ref);
       if (!snap.exists) {
@@ -3241,7 +3341,7 @@ function MusicScheduler() {
   // reopened its hour to anyone. The marker overrides the board.
   function releaseClaim(date, time) {
     return claimsRef(boardKey, wkStart(date))
-      .update({ [`slots.${claimKey(parseD(date).getDay(), time)}`]: { released: true } })
+      .update({ [`slots.${claimKey(parseD(date).getDay(), time)}`]: RELEASED })
       .catch(e => {       // the week may simply have no claims document yet
         if (e?.code !== 'not-found') console.error('releaseClaim', e);
       });
@@ -3359,7 +3459,7 @@ function MusicScheduler() {
           id:l.id, teacherId:teacherUid, sid:l.sid, date:l.date, time:l.time,
           status:'teacher_cancelled', reason:l.reason || '',
         }, { merge:true });
-        freed[claimKey(di, l.time)] = { released: true };
+        freed[claimKey(di, l.time)] = RELEASED;
       });
 
       // The board is what students receive: slot states and names only —
@@ -3443,8 +3543,7 @@ function MusicScheduler() {
       const byWeek = {};
       held.forEach(l => {
         const ws = wkStart(l.date);
-        (byWeek[ws] = byWeek[ws] || {})[`slots.${claimKey(parseD(l.date).getDay(), l.time)}`] =
-          { released: true };
+        (byWeek[ws] = byWeek[ws] || {})[`slots.${claimKey(parseD(l.date).getDay(), l.time)}`] = RELEASED;
       });
       await Promise.all(Object.entries(byWeek).map(([ws, patch]) =>
         claimsRef(teacher?.boardKey, ws).update(patch).catch(() => {})));
@@ -3506,6 +3605,32 @@ function MusicScheduler() {
     }
   }
 
+  // ── an extra hour in a week that is already out ───────────────────────────
+  // The mirror image of blocking: "this Wednesday I can also come in the
+  // morning". It adds to the same week plan, so the hour behaves like any
+  // other open hour — bookable by the teacher, visible to students — but only
+  // for that one week.
+  async function setWeekExtra(ws, di, t, on) {
+    try {
+      const published = !!teacher?.weekPlans?.[ws];
+      const cur  = teacher?.weekPlans?.[ws] || { weekStart:ws, cancelledIds:[], blockedSlots:[], extraSlots:[], note:'' };
+      const rest = (cur.extraSlots || []).filter(e => !(e.di === di && e.t === t));
+      const plan = {
+        ...cur, weekStart: ws,
+        extraSlots: on ? [...rest, { di, t }] : rest,
+        // Adding an hour back that was blocked earlier in the week should not
+        // leave it blocked, or it would be added and instantly hidden.
+        blockedSlots: on ? (cur.blockedSlots || []).filter(b => !(b.di === di && b.t === t)) : (cur.blockedSlots || []),
+      };
+
+      await teacherRef().set({ weekPlans: { [ws]: plan } }, { merge:true });
+      if (published) await republishBoard(ws, plan);
+    } catch (e) {
+      console.error('setWeekExtra', e);
+      alert('עדכון השעה החריגה נכשל. בדוק את החיבור ונסה שוב.');
+    }
+  }
+
   // Claims are written at booking time and hold a snapshot of the phone, so
   // they need scrubbing too.
   async function rewriteClaimsFor(sid, phone) {
@@ -3515,7 +3640,7 @@ function MusicScheduler() {
     held.forEach(l => {
       const ws = wkStart(l.date);
       (byWeek[ws] = byWeek[ws] || {})[claimKey(parseD(l.date).getDay(), l.time)] =
-        { name: stu?.name || '', phone };
+        { name: stu?.name || '', phone, released: false };
     });
     await Promise.all(Object.entries(byWeek).map(([ws, slots]) =>
       claimsRef(teacher?.boardKey, ws).set({ slots }, { merge:true }).catch(() => {})));
@@ -3653,7 +3778,7 @@ function MusicScheduler() {
 
   const ctx = {
     students: enrichedStudents, pendingStudents, lessons,
-    TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, boards, claims, setWeekBlock,
+    TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, boards, claims, setWeekBlock, setWeekExtra,
     updLesson, addLesson, pubWeek, approveStudent, rejectStudent, deleteStudent,
     approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
     baseSlots: teacher?.slots || [],
