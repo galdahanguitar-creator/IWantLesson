@@ -772,9 +772,11 @@ function TeacherWeekTab({ ctx }) {
     });
 
     openSlots.forEach(s => {
-      // Whose hour this was, when it is free because they cancelled.
+      // Whose hour this was, but only when they actually dropped it. A student
+      // who moved to another hour did not give this one up in any sense worth
+      // reporting — they are simply elsewhere, and their lesson is drawn there.
       const gave = weekLessons.find(l => l.date===s.date && l.time===s.time
-                                      && ['cancelled_justified','cancelled_unjustified','teacher_cancelled','moved','no_show'].includes(l.status));
+                                      && ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show'].includes(l.status));
       const stu  = gave ? students.find(x => x.id === gave.sid) : null;
       put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di,
             isExtra: extraKeys.has(`${s.di}_${s.time}`),
@@ -793,16 +795,21 @@ function TeacherWeekTab({ ctx }) {
     return [...diSet].sort().map(di => ({ date: dateOfDi(THIS_WK, di), di }));
   }, [items, THIS_WK]);
 
+  // The week is read for the lessons in it. An open hour is an invitation, not
+  // an event, so it is drawn quietly — pale, thin, dashed — and never carries a
+  // student's name: a student who moved twice would otherwise leave their name
+  // scattered across every hour they passed through, reading like three
+  // bookings instead of one. Who freed the hour is in the detail sheet.
   function renderItem(item, top, height) {
-    let bg, fg, border, label, sub = item.time, faded = false;
+    let bg, fg, border, label, faded = false, strong = true;
     if (item.kind === 'blocked') {
-      bg='#fee2e2'; fg='#991b1b'; border='#fca5a5'; label='🚫 חסום'; faded = true;
+      bg='#fef2f2'; fg='#b91c1c'; border='#fca5a5'; label='🚫 חסום'; strong = false;
     } else if (item.kind === 'free') {
       const past = hoursUntil(item.date, item.time) <= 0;
-      if (past)            { bg='#f8fafc'; fg='#94a3b8'; border='#e2e8f0'; label='חלף'; faded = true; }
-      else if (item.isExtra) { bg='#fef9c3'; fg='#78350f'; border='#fde68a'; label='⭐ חריגה'; }
-      else                 { bg='#ccfbf1'; fg='#0f766e'; border='#5eead4';
-                             label = item.freedBy ? `פנוי · ${item.freedBy}` : '＋ פנוי'; }
+      strong = false;
+      if (past)              { bg='transparent'; fg='#cbd5e1'; border='#e8edf3'; label='חלף'; faded = true; }
+      else if (item.isExtra) { bg='#fffbeb';     fg='#a16207'; border='#fde68a'; label='⭐ חריגה'; }
+      else                   { bg='#f5fdfb';     fg='#4b9187'; border='#b7e4db'; label='＋ פנוי'; }
     } else {
       const l = item.lesson;
       const stu = students.find(s => s.id === l.sid);
@@ -818,10 +825,11 @@ function TeacherWeekTab({ ctx }) {
       <div key={item.id} onClick={e => { e.stopPropagation(); setSelected(item); }} style={{
         position:'absolute', top, left:2, right:2, height,
         background:bg, border:`1px ${item.kind==='free' ? 'dashed' : 'solid'} ${border}`, borderRadius:5,
-        padding:'3px 5px', cursor:'pointer', overflow:'hidden', opacity: faded ? 0.55 : 1,
+        padding:'3px 5px', cursor:'pointer', overflow:'hidden', opacity: faded ? 0.6 : 1,
       }}>
-        <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
-        <div style={{ fontSize:10, color:fg }}>{sub}</div>
+        <div style={{ fontSize: strong ? 11 : 10.5, fontWeight: strong ? 700 : 500, color:fg,
+                      overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
+        <div style={{ fontSize: strong ? 10 : 9.5, color:fg, opacity: strong ? 1 : 0.85 }}>{item.time}</div>
       </div>
     );
   }
@@ -842,7 +850,7 @@ function TeacherWeekTab({ ctx }) {
     <div>
       <div style={{ ...S.row, justifyContent:'space-between', marginBottom:10, flexWrap:'wrap', gap:8 }}>
         <div style={{ ...S.row, gap:12, flexWrap:'wrap' }}>
-          {[['#dbeafe','#93c5fd','שיעור'],['#ccfbf1','#5eead4','פנוי'],['#fef9c3','#fde68a','חריגה'],['#fee2e2','#fca5a5','חסום']].map(([bg,bd,l]) => (
+          {[['#dbeafe','#93c5fd','שיעור'],['#f5fdfb','#b7e4db','פנוי'],['#fffbeb','#fde68a','חריגה'],['#fef2f2','#fca5a5','חסום']].map(([bg,bd,l]) => (
             <div key={l} style={{ ...S.row, gap:4 }}>
               <div style={{ width:10, height:10, borderRadius:2, background:bg, border:`1px solid ${bd}` }} />
               <span style={{ fontSize:11, color:'var(--color-text-secondary)' }}>{l}</span>
@@ -2734,12 +2742,18 @@ function StudentBoardTab({ ctx }) {
   const OPEN_MIN_HOURS = 2;
   const isBookable = s => s.state === 'free' && !getHoliday(s.date) && hoursUntil(s.date, s.t) >= OPEN_MIN_HOURS;
 
-  const calItems = useMemo(() => slots.map(s => ({
-    id: `${s.date}_${s.t}`, date: s.date, time: s.t, di: s.di,
-    state: s.state, name: s.name, phone: s.phone,
-    mine: mineKeys.has(`${s.date}_${s.t}`),
-    bookable: isBookable(s),
-  })), [slots, mineKeys]);
+  const calItems = useMemo(() => slots.map(s => {
+    const mine = mineKeys.has(`${s.date}_${s.t}`);
+    // My own lessons outrank the shared map. If the two ever disagree — a
+    // write that half-landed, an old record — the student still sees the
+    // lesson they actually have, instead of an hour offered to everyone.
+    const state = mine && s.state !== 'blocked' ? 'taken' : s.state;
+    return {
+      id: `${s.date}_${s.t}`, date: s.date, time: s.t, di: s.di,
+      state, name: s.name, phone: s.phone, mine,
+      bookable: !mine && isBookable({ ...s, state }),
+    };
+  }), [slots, mineKeys]);
 
   // Lessons of mine in the week on screen that could move into a tapped hour.
   // A lesson already awaiting a cancellation decision is not one of them, and
@@ -3630,6 +3644,63 @@ function MusicScheduler() {
       alert('עדכון השעה החריגה נכשל. בדוק את החיבור ונסה שוב.');
     }
   }
+
+  // ── repairing the taken-hours map ─────────────────────────────────────────
+  // The lessons are the record of truth; the claims map is a cache of them that
+  // the board reads. They can drift — a write that lands half-way, a browser
+  // closed mid-move, or the merge bug that used to leave a "released" marker
+  // sitting under a fresh booking and hid the student from the board entirely.
+  //
+  // So: every hour a real lesson holds must read as taken by that student, and
+  // every hour claimed by nobody must read as free. Only actual differences are
+  // written, so on a healthy week this costs two reads and nothing else.
+  async function repairClaims(ws) {
+    if (!teacher?.boardKey) return 0;
+    const ref = claimsRef(teacher.boardKey, ws);
+    const snap = await ref.get();
+    if (!snap.exists) return 0;              // week not published — nothing to repair
+    const cur = snap.data().slots || {};
+
+    const heldAll  = lessons.filter(l => HOLDS.includes(l.status) && inWk(l.date, ws));
+    const heldReal = heldAll.filter(l => !l.virtual);
+    const patch = {};
+
+    // Hours a lesson holds, that the board would not show as taken.
+    heldReal.forEach(l => {
+      const key = claimKey(parseD(l.date).getDay(), l.time);
+      const stu = enrichedStudents.find(s => s.id === l.sid);
+      if (!stu) return;
+      const want = { name: stu.name || '', phone: stu.shareContact !== false ? (stu.phone || '') : '', released: false };
+      const got  = cur[key];
+      if (!got || got.released === true || got.name !== want.name || got.phone !== want.phone) patch[key] = want;
+    });
+
+    // Hours the board shows as taken with no lesson behind them.
+    Object.entries(cur).forEach(([key, v]) => {
+      if (!v || v.released === true) return;
+      const held = heldAll.some(l => claimKey(parseD(l.date).getDay(), l.time) === key);
+      if (!held) patch[key] = RELEASED;
+    });
+
+    const n = Object.keys(patch).length;
+    if (n) await ref.set({ slots: patch }, { merge:true });
+    return n;
+  }
+
+  // Runs once per teacher session, quietly. A teacher opening the app is the
+  // only moment we can be sure the whole lesson list is in hand.
+  const repairedRef = useRef(false);
+  useEffect(() => {
+    if (!db || !isTeacher || !teacher?.boardKey || !lessonsLoaded || repairedRef.current) return;
+    if (!enrichedStudents.length) return;
+    repairedRef.current = true;
+    (async () => {
+      try {
+        const fixed = (await repairClaims(THIS_WK)) + (await repairClaims(NEXT_WK));
+        if (fixed) console.info(`repairClaims: ${fixed} hour(s) resynced`);
+      } catch (e) { console.error('repairClaims', e); }
+    })();
+  }, [db, isTeacher, teacher, lessonsLoaded, enrichedStudents, lessons]);
 
   // Claims are written at booking time and hold a snapshot of the phone, so
   // they need scrubbing too.
