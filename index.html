@@ -138,6 +138,12 @@ function genCode(len = 6) {
 // teacher's recurring slots; a document exists only once something real has
 // happened to that lesson — it was held, cancelled, moved, or booked one-off.
 // This returns the same flat shape the whole UI already expects.
+// A lesson in one of these states is still holding its hour. `pending_move` is
+// a late move waiting on the teacher: the student keeps the old hour and the
+// new one is reserved, so neither can be handed to anyone else meanwhile.
+const LIVE = ['scheduled', 'pending_cancel', 'pending_move'];
+const isLive = (status) => LIVE.includes(status);
+
 function lessonId(sid, date, time, suffix)  { return `${sid}_${date}_${time}${suffix || ''}`; }
 
 function projectLessons(slots, students, real, weeks) {
@@ -220,7 +226,7 @@ function openSlotsFor(weekStart, { baseSlots = [], plan = null, lessons = [], st
     // teacher has removed from this week holds nothing.
     const taken = lessons.some(l =>
       l.date === date && l.time === s.t &&
-      ['scheduled','pending_cancel'].includes(l.status) &&
+      isLive(l.status) &&
       l.id !== excludeLessonId &&
       !cancelled.includes(l.sid) &&
       students.some(st => st.id === l.sid));
@@ -267,6 +273,7 @@ const STATUS_META = {
   cancelled_unjustified: { label:'בוטל (לא מוצדק)',  color:'danger' },
   teacher_cancelled:     { label:'בוטל ע"י המורה',   color:'default' },
   pending_cancel:        { label:'ממתין לביטול',     color:'warning' },
+  pending_move:          { label:'העברה — ממתין לאישור', color:'warning' },
   no_show:               { label:'לא הגיע',          color:'danger' },
 };
 
@@ -626,7 +633,8 @@ function LoginView({ onTeacher, onStudent }) {
 function TeacherView({ ctx }) {
   const [tab, setTab] = useState('week');
   const { lessons, logout } = ctx;
-  const pendingCount = lessons.filter(l => l.status === 'pending_cancel').length + (ctx.pendingStudents?.length || 0);
+  const pendingCount = lessons.filter(l => l.status === 'pending_cancel' || l.status === 'pending_move').length
+                     + (ctx.pendingStudents?.length || 0);
 
   return (
     <div style={S.page}>
@@ -675,7 +683,7 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
       .map(s => ({
         stu: s,
         week: lessons.filter(l => l.sid === s.id && inWk(l.date, ws)
-                              && ['scheduled','pending_cancel'].includes(l.status))
+                              && isLive(l.status))
                      .sort((a,b) => a.date.localeCompare(b.date)),
       }))
       .sort((a,b) => (a.week.length - b.week.length) || (a.stu.name || '').localeCompare(b.stu.name || '', 'he'));
@@ -719,7 +727,7 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
 // hours can be filled from here, and an hour can be blocked mid-week when
 // something comes up. Both act on the week students are already looking at.
 function TeacherWeekTab({ ctx }) {
-  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, setWeekBlock, setWeekExtra } = ctx;
+  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, updLesson, setWeekBlock, setWeekExtra } = ctx;
   const [selected, setSelected] = useState(null);   // a calendar item
   const [assigning, setAssigning] = useState(null); // {date,time,di}
   const [busy, setBusy] = useState(false);
@@ -763,7 +771,7 @@ function TeacherWeekTab({ ctx }) {
     const byKey = new Map();
     const put = (item) => { const k = `${item.date}_${item.time}`; if (!byKey.has(k)) byKey.set(k, item); };
 
-    weekLessons.filter(l => ['scheduled','pending_cancel'].includes(l.status) && isValidTime(l.time))
+    weekLessons.filter(l => isLive(l.status) && isValidTime(l.time))
       .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
 
     (pubThis?.blockedSlots || []).filter(b => isValidTime(b.t)).forEach(b => {
@@ -783,7 +791,7 @@ function TeacherWeekTab({ ctx }) {
             freedBy:stu?.name || null, freedStatus:gave?.status || null });
     });
 
-    weekLessons.filter(l => !['scheduled','pending_cancel'].includes(l.status) && isValidTime(l.time))
+    weekLessons.filter(l => !isLive(l.status) && isValidTime(l.time))
       .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
 
     return [...byKey.values()];
@@ -813,7 +821,7 @@ function TeacherWeekTab({ ctx }) {
     } else {
       const l = item.lesson;
       const stu = students.find(s => s.id === l.sid);
-      const isPending = l.status === 'pending_cancel';
+      const isPending = l.status === 'pending_cancel' || l.status === 'pending_move';
       const isCancelled = ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show','moved'].includes(l.status);
       bg = isPending?'#fef3c7':isCancelled?'#f1f5f9':'#dbeafe';
       fg = isPending?'#92400e':isCancelled?'#94a3b8':'#1e40af';
@@ -844,7 +852,7 @@ function TeacherWeekTab({ ctx }) {
 
   const selLesson = selected?.kind === 'lesson' ? selected.lesson : null;
   const selStu    = selLesson ? students.find(s => s.id === selLesson.sid) : null;
-  const selLive   = selLesson && ['scheduled','pending_cancel'].includes(selLesson.status);
+  const selLive   = selLesson && isLive(selLesson.status);
 
   return (
     <div>
@@ -882,9 +890,11 @@ function TeacherWeekTab({ ctx }) {
 
           {selLesson && <StatusBadge status={selLesson.status} />}
           {selLesson?.reason && <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'10px 0 0', direction:'rtl' }}>סיבה: {selLesson.reason}</p>}
-          {selLesson?.status === 'pending_cancel' && (
+          {(selLesson?.status === 'pending_cancel' || selLesson?.status === 'pending_move') && (
             <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginTop:12, direction:'rtl' }}>
-              <div style={{ fontSize:13, color:'var(--color-text-warning)' }}>בקשת ביטול ממתינה — עבור ללשונית <strong>בקשות</strong></div>
+              <div style={{ fontSize:13, color:'var(--color-text-warning)' }}>
+                {selLesson.status === 'pending_move' ? 'בקשת העברה ממתינה' : 'בקשת ביטול ממתינה'} — עבור ללשונית <strong>בקשות</strong>
+              </div>
             </div>
           )}
 
@@ -930,14 +940,27 @@ function TeacherWeekTab({ ctx }) {
           )}
 
           {selLive && (
-            <button style={{ ...S.btn('danger'), width:'100%', margin:'16px 0 0' }}
-              onClick={() => {
-                if (!confirm(`לחסום את יום ${DAY_HE[selected.di]} ${selected.time}? השיעור של ${selStu?.name || 'התלמיד'} יבוטל והשעה תיסגר.`)) return;
-                setWeekBlock(THIS_WK, selected.di, selected.time, true);
-                setSelected(null);
-              }}>
-              🚫 אני לא מגיע — בטל וחסום את השעה
-            </button>
+            <>
+              {/* Cancelling and blocking are different intentions: one hands the
+                  hour back to the pool, the other closes it. Assign the wrong
+                  student and you want the first one. */}
+              <button style={{ ...S.btn('warning'), width:'100%', margin:'16px 0 8px' }}
+                onClick={() => {
+                  if (!confirm(`לבטל את השיעור של ${selStu?.name || 'התלמיד'} ביום ${DAY_HE[selected.di]} ${selected.time}? השעה תחזור להיות פנויה.`)) return;
+                  updLesson(selLesson.id, { status:'teacher_cancelled' });
+                  setSelected(null);
+                }}>
+                ✖ בטל את השיעור — השעה תחזור להיות פנויה
+              </button>
+              <button style={{ ...S.btn('danger'), width:'100%' }}
+                onClick={() => {
+                  if (!confirm(`לחסום את יום ${DAY_HE[selected.di]} ${selected.time}? השיעור של ${selStu?.name || 'התלמיד'} יבוטל והשעה תיסגר.`)) return;
+                  setWeekBlock(THIS_WK, selected.di, selected.time, true);
+                  setSelected(null);
+                }}>
+                🚫 אני לא מגיע — בטל וחסום את השעה
+              </button>
+            </>
           )}
 
           <button style={{ ...S.btn('ghost'), marginTop:14, width:'100%' }} onClick={() => setSelected(null)}>סגור</button>
@@ -1029,7 +1052,7 @@ function TeacherNextWeekTab({ ctx }) {
       const isBlocked  = blockedSlots.some(b => b.di===slot.di && b.t===slot.t);
       const isCancelled= slot.sid ? cancelledIds.includes(slot.sid) : false;
       const fixedStu   = slot.sid ? students.find(s => s.id===slot.sid) : null;
-      const lesson     = lessons.find(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status));
+      const lesson     = lessons.find(l => l.date===date && l.time===slot.t && isLive(l.status));
       const bookedStu  = lesson ? students.find(s => s.id===lesson.sid) : null;
       const flexStu    = bookedStu && bookedStu.id !== (slot.sid || '') ? bookedStu : null;
       const isOrphaned = !!(slot.sid && !fixedStu);
@@ -1044,7 +1067,7 @@ function TeacherNextWeekTab({ ctx }) {
       const key = `extra_${date}_${slot.t}`;
       if (used.has(key)) return;
       used.add(key);
-      const lesson   = lessons.find(l => l.date===date && l.time===slot.t && ['scheduled','pending_cancel'].includes(l.status));
+      const lesson   = lessons.find(l => l.date===date && l.time===slot.t && isLive(l.status));
       const bookedStu= lesson ? students.find(s => s.id===lesson.sid) : null;
       items.push({ id:key, date, time:slot.t, di:slot.di, lesson, fixedStu:null, flexStu:bookedStu||null, isCancelled:false, isBlocked:false, isExtra:true, isEmpty:!lesson });
     });
@@ -1052,7 +1075,7 @@ function TeacherNextWeekTab({ ctx }) {
     // Also show lessons that exist in Firestore but have no matching baseSlot or extraSlot
     // (e.g. one-time lessons added after the slot was deleted from baseSlots)
     lessons.forEach(lesson => {
-      if (!['scheduled','pending_cancel'].includes(lesson.status)) return;
+      if (!isLive(lesson.status)) return;
       if (!inWk(lesson.date, NEXT_WK)) return;
       const key = `${lesson.date}_${lesson.time}`;
       const extraKey = `extra_${lesson.date}_${lesson.time}`;
@@ -1719,7 +1742,7 @@ function TeacherStudentsTab({ ctx }) {
   if (selected) {
     const stu = students.find(s => s.id === selected);
     const stats = getStats(selected);
-    const history = lessons.filter(l => l.sid===selected && !['scheduled','pending_cancel'].includes(l.status))
+    const history = lessons.filter(l => l.sid===selected && !isLive(l.status))
       .sort((a,b) => b.date.localeCompare(a.date)).slice(0,20);
     const progress = Math.round((stats.happened/32)*100);
     return (
@@ -2098,16 +2121,17 @@ function ApprovedCodeModal({ info, onClose }) {
 
 // ── Teacher: Cancellation Requests + Pending Registrations ──────────────────
 function TeacherRequestsTab({ ctx }) {
-  const { lessons, students, updLesson, pendingStudents, approveStudent, rejectStudent, pubNext, NEXT_WK } = ctx;
+  const { lessons, students, updLesson, resolveMove, pendingStudents, approveStudent, rejectStudent, pubNext, NEXT_WK } = ctx;
   const [approvingId, setApprovingId] = useState(null);
   const [assignType,  setAssignType]  = useState('flexible');
   const [assignDi,    setAssignDi]    = useState(1);
   const [assignT,     setAssignT]     = useState('09:00');
 
   const pendingCancel = lessons.filter(l => l.status==='pending_cancel').sort((a,b) => a.date.localeCompare(b.date));
+  const pendingMove   = lessons.filter(l => l.status==='pending_move').sort((a,b) => a.date.localeCompare(b.date));
   const unregisteredFlex = pubNext ? students.filter(s => {
     if (s.status === 'deleted') return false;
-    const hasLesson = lessons.some(l => l.sid===s.id && inWk(l.date, NEXT_WK) && ['scheduled','pending_cancel'].includes(l.status));
+    const hasLesson = lessons.some(l => l.sid===s.id && inWk(l.date, NEXT_WK) && isLive(l.status));
     if (hasLesson) return false;
     if (s.type === 'flexible') return true;
     // fixed student cancelled or blocked for next week — needs to rebook
@@ -2120,7 +2144,7 @@ function TeacherRequestsTab({ ctx }) {
   }) : [];
   const pendingStu    = pendingStudents || [];
 
-  if (pendingCancel.length===0 && pendingStu.length===0 && unregisteredFlex.length===0) return (
+  if (pendingCancel.length===0 && pendingMove.length===0 && pendingStu.length===0 && unregisteredFlex.length===0) return (
     <div style={{ textAlign:'center', padding:'40px 0', color:'var(--color-text-secondary)', fontSize:14 }}>אין בקשות ממתינות</div>
   );
 
@@ -2209,6 +2233,42 @@ function TeacherRequestsTab({ ctx }) {
         </div>
       )}
 
+      {/* ── Late move requests ── */}
+      {/* A move asked for inside 24 hours. The student is holding both hours
+          until this is answered, so answering it promptly matters. */}
+      {pendingMove.length > 0 && (
+        <>
+          <div style={{ fontSize:13, fontWeight:500, color:'var(--color-text-secondary)', margin:'14px 0 8px' }}>בקשות העברת שיעור</div>
+          {pendingMove.map(l => {
+            const stu = students.find(s => s.id===l.sid);
+            return (
+              <div key={l.id} style={{ ...S.card, border:'1.5px solid #FAC775', background:'#FFFCF6' }}>
+                <div style={{ ...S.row, marginBottom:6 }}>
+                  <span style={{ fontSize:15, fontWeight:500 }}>{stu?.name || 'תלמיד שנמחק'}</span>
+                  <span style={{ ...S.badge('warning'), fontSize:10 }}>פחות מ-24 שעות</span>
+                </div>
+                <div style={{ fontSize:13.5, color:'var(--color-text-secondary)', margin:'0 0 4px', direction:'rtl' }}>
+                  {l.movedFrom
+                    ? <>מבקש להעביר מיום <strong>{DAY_HE[parseD(l.movedFrom.date).getDay()]} {dd(l.movedFrom.date)} · {l.movedFrom.time}</strong></>
+                    : 'מבקש להעביר שיעור'}
+                </div>
+                <div style={{ fontSize:13.5, color:'var(--color-text-info)', margin:'0 0 12px', direction:'rtl' }}>
+                  ← ליום <strong>{DAY_HE[parseD(l.date).getDay()]} {dd(l.date)} · {l.time}</strong>
+                  <HolBadge date={l.date} />
+                </div>
+                <div style={{ ...S.row, gap:8 }}>
+                  <button style={{ ...S.btn('success'), flex:1 }} onClick={() => resolveMove(l, true)}>אשר את ההעברה</button>
+                  <button style={{ ...S.btn('danger'), flex:1 }} onClick={() => resolveMove(l, false)}>דחה — שיישאר במקום</button>
+                </div>
+                <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginTop:8, lineHeight:1.6 }}>
+                  דחייה מחזירה את השעה המבוקשת למאגר; השיעור המקורי נשאר כפי שהוא.
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+
       {/* ── Pending cancellations ── */}
       {pendingCancel.length > 0 && (
         <>
@@ -2245,6 +2305,7 @@ function TeacherSettingsTab({ ctx }) {
   const { teacher, updateTeacher } = ctx;
   const [studio, setStudio] = useState(teacher?.studioName || '');
   const [name,   setName]   = useState(teacher?.name || '');
+  const [phone,  setPhone]  = useState(teacher?.phone || '');
   const [saved,  setSaved]  = useState('');
   const [copied, setCopied] = useState(false);
   const [hName,  setHName]  = useState('');
@@ -2257,7 +2318,7 @@ function TeacherSettingsTab({ ctx }) {
   const upcoming = holidays.filter(h => h.e >= todayS());
 
   async function saveProfile() {
-    await updateTeacher({ studioName: studio.trim(), name: name.trim() });
+    await updateTeacher({ studioName: studio.trim(), name: name.trim(), phone: phone.trim() });
     setSaved('פרטי האולפן נשמרו'); setTimeout(() => setSaved(''), 2500);
   }
 
@@ -2291,6 +2352,13 @@ function TeacherSettingsTab({ ctx }) {
         <div style={S.label}>שמך</div>
         <input style={{ ...S.input, marginBottom:12 }} value={name}
           onChange={e => setName(e.target.value)} placeholder="שם המורה" />
+        <div style={S.label}>טלפון לוואטסאפ</div>
+        <input style={{ ...S.input, marginBottom:6 }} value={phone} inputMode="tel"
+          onChange={e => setPhone(e.target.value)} placeholder="למשל 0501234567" />
+        <div style={{ fontSize:11, color:'var(--color-text-secondary)', margin:'0 0 12px' }}>
+          תלמיד שמבקש להעביר שיעור פחות מ-24 שעות מראש יוכל לשלוח לך הודעה בלחיצה.
+          בלי מספר, הבקשה עדיין מגיעה ללשונית בקשות — פשוט בלי ההתראה.
+        </div>
         <button style={{ ...S.btn('primary'), width:'100%' }} onClick={saveProfile}>שמור</button>
         {saved && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{saved}</div>}
       </div>
@@ -2443,6 +2511,20 @@ function freeSlotsFor(weekStart, board, claims, { after } = {}) {
     .sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
 }
 
+// A move asked for less than this many hours before the lesson is a request,
+// not a move. Without it the 24-hour cancellation policy is trivially dodged:
+// move the lesson you cannot attend to some free hour later in the week, then
+// simply do not turn up.
+const MOVE_NOTICE_H = 24;
+const isLateMove = (lesson) => !!lesson && hoursUntil(lesson.date, lesson.time) < MOVE_NOTICE_H;
+
+// wa.me wants an international number with no punctuation.
+function waLink(phone, text) {
+  const n = String(phone || '').replace(/\D/g, '').replace(/^0/, '');
+  if (!n) return '';
+  return `https://wa.me/972${n}?text=${encodeURIComponent(text)}`;
+}
+
 // ── Student: My schedule ──────────────────────────────────────────────────────
 function StudentMineTab({ ctx }) {
   const { me, lessons, TODAY, THIS_WK, NEXT_WK, boards, claims, pubNext, updLesson, addLesson } = ctx;
@@ -2457,7 +2539,7 @@ function StudentMineTab({ ctx }) {
   );
 
   const upcoming = myLessons.filter(l => l.status==='scheduled' && l.date>=TODAY);
-  const history  = myLessons.filter(l => !['scheduled','pending_cancel'].includes(l.status))
+  const history  = myLessons.filter(l => !isLive(l.status))
                             .sort((a,b) => b.date.localeCompare(a.date)).slice(0,10);
 
   const boardThis = boards[THIS_WK] || null;
@@ -2490,14 +2572,25 @@ function StudentMineTab({ ctx }) {
   }
 
   // Take the new hour before giving up the old one: if someone claimed it a
-  // moment earlier, the student is told, and keeps the lesson they had.
+  // moment earlier, the student is told, and keeps the lesson they had. Inside
+  // the 24-hour window nothing is given up at all — the move is only requested.
   async function submitMove(oldLesson, newSlot) {
-    const ok = await addLesson(me.id, newSlot.date, newSlot.time);
+    const late = isLateMove(oldLesson);
+    const ok = await addLesson(me.id, newSlot.date, newSlot.time, late ? {
+      status: 'pending_move',
+      movedFromId: oldLesson.id,
+      movedFrom: { date: oldLesson.date, time: oldLesson.time },
+      requestedAt: new Date().toISOString(),
+    } : undefined);
     if (!ok) return;
-    await updLesson(oldLesson.id, { status:'moved' });
     setMoveModal(null);
-    setMoveSuccess(`✓ השיעור הועבר ליום ${DAY_HE[newSlot.di]} ${dd(newSlot.date)} · ${newSlot.time}`);
-    setTimeout(() => setMoveSuccess(null), 5000);
+    if (late) {
+      setMoveSuccess('⏳ הבקשה נשלחה למורה — השיעור המקורי שלך בתוקף עד שהיא תענה');
+    } else {
+      await updLesson(oldLesson.id, { status:'moved' });
+      setMoveSuccess(`✓ השיעור הועבר ליום ${DAY_HE[newSlot.di]} ${dd(newSlot.date)} · ${newSlot.time}`);
+    }
+    setTimeout(() => setMoveSuccess(null), 6000);
   }
 
   function bookSlot(slot) { return addLesson(me.id, slot.date, slot.time); }
@@ -2517,6 +2610,19 @@ function StudentMineTab({ ctx }) {
           <div style={{ fontSize:14, color:'var(--color-text-info)' }}>{pubNext.note}</div>
         </div>
       )}
+
+      {myLessons.filter(l => l.status === 'pending_move').map(l => (
+        <div key={l.id} style={{ ...S.card, background:'var(--color-background-warning)', border:'1.5px solid #FAC775', marginBottom:10, direction:'rtl' }}>
+          <div style={{ fontSize:12.5, fontWeight:600, color:'var(--color-text-warning)', marginBottom:4 }}>⏳ בקשת העברה ממתינה למורה</div>
+          <div style={{ fontSize:13, color:'var(--color-text-warning)', lineHeight:1.6 }}>
+            {l.movedFrom && <>מיום {DAY_HE[parseD(l.movedFrom.date).getDay()]} {dd(l.movedFrom.date)} · {l.movedFrom.time} </>}
+            ← יום {DAY_HE[parseD(l.date).getDay()]} {dd(l.date)} · {l.time}
+          </div>
+          <div style={{ fontSize:11.5, color:'var(--color-text-warning)', marginTop:6, opacity:0.9 }}>
+            עד לתשובה — השיעור המקורי שלך בתוקף.
+          </div>
+        </div>
+      ))}
 
       {(thisWkLesson2 || nextWkLesson2) && (
         <div style={{ ...S.card, background:'#fef9c3', border:'1px solid #fde68a', marginBottom:10 }}>
@@ -2631,6 +2737,15 @@ function StudentMineTab({ ctx }) {
             <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:2 }}>שיעור נוכחי</div>
             <div style={{ fontSize:14, fontWeight:500 }}>יום {DAY_HE[parseD(moveModal.date).getDay()]} {dd(moveModal.date)} · {moveModal.time}</div>
           </div>
+          {isLateMove(moveModal) && (
+            <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginBottom:14, direction:'rtl' }}>
+              <div style={{ fontSize:13, fontWeight:600, color:'var(--color-text-warning)', marginBottom:3 }}>פחות מ-24 שעות לשיעור</div>
+              <div style={{ fontSize:12.5, color:'var(--color-text-warning)', lineHeight:1.6 }}>
+                בטווח הזה ההעברה טעונה אישור המורה. השעה שתבחר תישמר לך, והשיעור
+                המקורי יישאר בתוקף עד שתתקבל תשובה.
+              </div>
+            </div>
+          )}
 
           {moveSlotsForLesson.thisWk.length === 0 && moveSlotsForLesson.nextWk.length === 0 ? (
             <div style={{ ...S.card, textAlign:'center', color:'var(--color-text-secondary)', fontSize:14, direction:'rtl' }}>
@@ -2714,11 +2829,13 @@ function LessonCard({ lesson, onCancel, onMove, showActions }) {
 function StudentBoardTab({ ctx }) {
   const { me, lessons, THIS_WK, NEXT_WK, boards, claims, pubNext, updLesson, addLesson } = ctx;
   const [weekView, setWeekView] = useState('this');
+  const teacherPhone = (boards[THIS_WK] || boards[NEXT_WK] || {}).teacherPhone || '';
 
   const [contact, setContact] = useState(null);
   const [pick,    setPick]    = useState(null);   // free hour the student tapped
   const [busy,    setBusy]    = useState(false);
   const [toast,   setToast]   = useState('');
+  const [sentRequest, setSentRequest] = useState(null);   // {from, to}
   const activeWk = weekView==='this' ? THIS_WK : NEXT_WK;
   const board    = boards[activeWk] || null;
   const cl       = claims[activeWk] || {};
@@ -2732,7 +2849,7 @@ function StudentBoardTab({ ctx }) {
 
   // Which slot is mine comes from my own lessons, never from the shared board.
   const mineKeys = useMemo(() => new Set(
-    lessons.filter(l => l.sid === me.id && ['scheduled','pending_cancel'].includes(l.status))
+    lessons.filter(l => l.sid === me.id && isLive(l.status))
            .map(l => `${l.date}_${l.time}`)
   ), [lessons, me.id]);
 
@@ -2760,23 +2877,29 @@ function StudentBoardTab({ ctx }) {
   // neither is one about to start.
   const movable = useMemo(() => lessons
     .filter(l => l.sid === me.id && l.status === 'scheduled' && inWk(l.date, activeWk)
-              && hoursUntil(l.date, l.time) >= OPEN_MIN_HOURS)
+              && hoursUntil(l.date, l.time) > 0)
     .sort((a,b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)),
     [lessons, me.id, activeWk]);
 
   async function take(fromLesson) {
     if (busy || !pick) return;
+    const late = isLateMove(fromLesson);
     setBusy(true);
-    // The new hour is secured first; only then is the old one given up, so a
+    // The new hour is secured first; only then is the old one given up, so an
     // hour taken a second earlier by someone else leaves the lesson where it is.
-    const ok = await addLesson(me.id, pick.date, pick.time);
-    if (ok && fromLesson) await updLesson(fromLesson.id, { status:'moved' });
+    const ok = await addLesson(me.id, pick.date, pick.time, late ? {
+      status: 'pending_move',
+      movedFromId: fromLesson.id,
+      movedFrom: { date: fromLesson.date, time: fromLesson.time },
+      requestedAt: new Date().toISOString(),
+    } : undefined);
+    if (ok && fromLesson && !late) await updLesson(fromLesson.id, { status:'moved' });
     setBusy(false);
-    if (ok) {
-      setToast(`✓ ${fromLesson ? 'השיעור הועבר ל' : 'נרשמת ל'}יום ${DAY_HE[pick.di]} ${dd(pick.date)} · ${pick.time}`);
-      setPick(null);
-      setTimeout(() => setToast(''), 5000);
-    }
+    if (!ok) return;
+    if (late) { setSentRequest({ from: fromLesson, to: pick }); setPick(null); return; }
+    setToast(`✓ ${fromLesson ? 'השיעור הועבר ל' : 'נרשמת ל'}יום ${DAY_HE[pick.di]} ${dd(pick.date)} · ${pick.time}`);
+    setPick(null);
+    setTimeout(() => setToast(''), 5000);
   }
 
   function renderItem(item, top, height) {
@@ -2885,24 +3008,60 @@ function StudentBoardTab({ ctx }) {
                 <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 10px' }}>
                   {movable.length === 1 ? 'להעביר לכאן את השיעור שלך?' : 'איזה שיעור להעביר לשעה הזו?'}
                 </p>
-                {movable.map(l => (
-                  <button key={l.id} disabled={busy}
-                    style={{ ...S.btn('primary'), width:'100%', textAlign:'right', marginBottom:8, opacity:busy?0.5:1 }}
-                    onClick={() => take(l)}>
-                    <div style={{ fontWeight:600 }}>
-                      {busy ? 'מעביר...' : `יום ${DAY_HE[parseD(l.date).getDay()]} ${dd(l.date)} · ${l.time}`}
+                {movable.map(l => {
+                  const late = isLateMove(l);
+                  return (
+                    <button key={l.id} disabled={busy}
+                      style={{ ...S.btn(late ? 'warning' : 'primary'), width:'100%', textAlign:'right', marginBottom:8, opacity:busy?0.5:1 }}
+                      onClick={() => take(l)}>
+                      <div style={{ fontWeight:600 }}>
+                        {busy ? 'שולח...' : `יום ${DAY_HE[parseD(l.date).getDay()]} ${dd(l.date)} · ${l.time}`}
+                      </div>
+                      <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.85 }}>
+                        ← יום {DAY_HE[pick.di]} {dd(pick.date)} · {pick.time}
+                        {late && ' · טעון אישור המורה'}
+                      </div>
+                    </button>
+                  );
+                })}
+                {movable.some(isLateMove) && (
+                  <div style={{ background:'var(--color-background-warning)', borderRadius:8, padding:'10px 12px', marginBottom:12 }}>
+                    <div style={{ fontSize:12.5, color:'var(--color-text-warning)', lineHeight:1.6 }}>
+                      שיעור שמתחיל בעוד פחות מ-24 שעות — ההעברה טעונה אישור המורה.
+                      השעה שביקשת נשמרת לך עד שהיא תענה.
                     </div>
-                    <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.85 }}>
-                      ← יום {DAY_HE[pick.di]} {dd(pick.date)} · {pick.time}
-                    </div>
-                  </button>
-                ))}
+                  </div>
+                )}
                 <p style={{ fontSize:11.5, color:'var(--color-text-secondary)', margin:'0 0 12px', lineHeight:1.6 }}>
                   השעה הישנה שלך תתפנה ותהיה פתוחה לתלמידים אחרים.
                 </p>
               </>
             )}
             <button style={{ ...S.btn('ghost'), width:'100%' }} disabled={busy} onClick={() => setPick(null)}>ביטול</button>
+          </div>
+        </Modal>
+      )}
+
+      {sentRequest && (
+        <Modal onClose={() => setSentRequest(null)}>
+          <div style={{ direction:'rtl', textAlign:'center', padding:'4px 0' }}>
+            <div style={{ fontSize:34, marginBottom:8 }}>⏳</div>
+            <div style={{ fontSize:17, fontWeight:600, marginBottom:6 }}>הבקשה נשלחה למורה</div>
+            <p style={{ fontSize:13.5, color:'var(--color-text-secondary)', margin:'0 0 6px', lineHeight:1.7 }}>
+              ביקשת להעביר את השיעור מיום {DAY_HE[parseD(sentRequest.from.date).getDay()]} {dd(sentRequest.from.date)} · {sentRequest.from.time}
+              <br/>ליום {DAY_HE[sentRequest.to.di]} {dd(sentRequest.to.date)} · {sentRequest.to.time}
+            </p>
+            <p style={{ fontSize:12, color:'var(--color-text-secondary)', margin:'0 0 16px', lineHeight:1.7 }}>
+              עד שהמורה תאשר — השיעור המקורי שלך נשאר בתוקף, והשעה החדשה שמורה לך.
+            </p>
+            {waLink(teacherPhone, `היי, ביקשתי להעביר את השיעור שלי מיום ${DAY_HE[parseD(sentRequest.from.date).getDay()]} ${dd(sentRequest.from.date)} ${sentRequest.from.time} ליום ${DAY_HE[sentRequest.to.di]} ${dd(sentRequest.to.date)} ${sentRequest.to.time}. תודה!`) ? (
+              <a href={waLink(teacherPhone, `היי, ביקשתי להעביר את השיעור שלי מיום ${DAY_HE[parseD(sentRequest.from.date).getDay()]} ${dd(sentRequest.from.date)} ${sentRequest.from.time} ליום ${DAY_HE[sentRequest.to.di]} ${dd(sentRequest.to.date)} ${sentRequest.to.time}. תודה!`)}
+                 target="_blank" rel="noopener noreferrer"
+                 style={{ ...S.btn('success'), width:'100%', display:'block', textDecoration:'none', padding:'12px', marginBottom:10, boxSizing:'border-box' }}>
+                💬 הקפץ הודעה למורה בוואטסאפ
+              </a>
+            ) : null}
+            <button style={{ ...S.btn('ghost'), width:'100%' }} onClick={() => setSentRequest(null)}>סגור</button>
           </div>
         </Modal>
       )}
@@ -3310,7 +3469,7 @@ function MusicScheduler() {
   // A virtual lesson becomes a real document the first time it is touched.
   // Claims mark an hour as taken for everyone else. They carry a display name
   // and nothing else — never the code that identifies the student.
-  const HOLDS = ['scheduled', 'pending_cancel'];
+  const HOLDS = LIVE;
 
   // What an hour looks like once it has been handed back. Every field a claim
   // can carry is written, because these maps are always merged: a partial
@@ -3388,7 +3547,12 @@ function MusicScheduler() {
 
   // Returns true only if the hour was actually secured — callers that are
   // moving a lesson must not give up the old hour before this succeeds.
-  async function addLesson(sid, date, time) {
+  //
+  // `extra` carries the status and provenance of a late move that is waiting on
+  // the teacher. Such a request claims its hour like any booking: a request
+  // that does not hold the hour it asks for is worth nothing by the time it is
+  // answered.
+  async function addLesson(sid, date, time, extra) {
     const tid  = isTeacher ? teacherUid : me?.teacherId;
     const base = lessonId(sid, date, time);
     const stu  = isTeacher ? enrichedStudents.find(s => s.id === sid) : me;
@@ -3413,6 +3577,7 @@ function MusicScheduler() {
       await lessonRef(sid, id).set({
         id, teacherId: tid, sid, date, time,
         status: 'scheduled', reason: '', cancelledAt: null,
+        ...(extra || {}),
       }, { merge: true });
       return true;
     } catch (e) {
@@ -3481,6 +3646,7 @@ function MusicScheduler() {
       batch.set(boardRef(teacher?.boardKey, ws), {
         teacherId: teacherUid, weekStart: ws, note: note || '',
         studioName: teacher?.studioName || '',
+        teacherPhone: teacher?.phone || '',
         slots: buildBoardSlots(cancelledIds, blockedSlots, extraSlots),
         holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
         publishedAt: new Date().toISOString(),
@@ -3585,6 +3751,7 @@ function MusicScheduler() {
     await boardRef(teacher.boardKey, ws).set({
       teacherId: teacherUid, weekStart: ws, note: plan.note || '',
       studioName: teacher?.studioName || '',
+      teacherPhone: teacher?.phone || '',
       slots: buildBoardSlots(plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
       holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
       publishedAt: new Date().toISOString(),
@@ -3642,6 +3809,27 @@ function MusicScheduler() {
     } catch (e) {
       console.error('setWeekExtra', e);
       alert('עדכון השעה החריגה נכשל. בדוק את החיבור ונסה שוב.');
+    }
+  }
+
+  // ── late move requests ────────────────────────────────────────────────────
+  // A student who moves a lesson less than 24 hours before it starts does not
+  // move it — they ask. Until the teacher answers, the student holds both the
+  // old hour and the requested one, so the answer cannot arrive too late to be
+  // meaningful. Approving hands over the old hour; refusing gives back the new
+  // one and leaves the original lesson exactly as it was.
+  async function resolveMove(pending, approve) {
+    try {
+      if (approve) {
+        await updLesson(pending.id, { status: 'scheduled' });
+        if (pending.movedFromId) await updLesson(pending.movedFromId, { status: 'moved' });
+      } else {
+        await lessonRef(pending.sid, pending.id).delete();
+        await releaseClaim(pending.date, pending.time);
+      }
+    } catch (e) {
+      console.error('resolveMove', e);
+      alert('העדכון נכשל. בדוק את החיבור ונסה שוב.');
     }
   }
 
@@ -3849,7 +4037,7 @@ function MusicScheduler() {
 
   const ctx = {
     students: enrichedStudents, pendingStudents, lessons,
-    TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, boards, claims, setWeekBlock, setWeekExtra,
+    TODAY, THIS_WK, NEXT_WK, pubThis, pubNext, boards, claims, setWeekBlock, setWeekExtra, resolveMove,
     updLesson, addLesson, pubWeek, approveStudent, rejectStudent, deleteStudent,
     approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
     baseSlots: teacher?.slots || [],
