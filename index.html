@@ -185,6 +185,30 @@ function projectLessons(slots, students, real, weeks) {
   return out;
 }
 
+// ── branches (שלוחות) ────────────────────────────────────────────────────────
+// One teacher, several villages. The branch belongs to the HOUR, not to the
+// day: Thursday morning is one village and Thursday afternoon another, and a
+// day-level model cannot say that. Everything below therefore keys off
+// `slot.br`, an id from the teacher's own list.
+//
+// Two separate switches, deliberately. `branches` is the list; `branchesOn` is
+// whether it is enforced. Defining a branch must not instantly empty every
+// student's board — the teacher tags her hours in peace first, then turns it on.
+function branchName(branches, id) {
+  const b = (branches || []).find(x => x.id === id);
+  return b ? b.name : '';
+}
+
+// What a student is allowed to see and take. `null` branch on an hour means the
+// teacher has not said where it is; while branches are enforced that hour is
+// hers alone, because guessing wrong sends a child to the wrong village.
+function slotVisibleTo(slot, studentBr, on) {
+  if (!on) return true;
+  if (!slot.br) return false;
+  if (!studentBr) return false;
+  return slot.br === studentBr;
+}
+
 // ── Which hours are open, on the teacher's side ───────────────────────────────
 // One answer, used by every teacher surface: both week calendars, the one-off
 // lesson picker and the move-lesson picker.
@@ -208,8 +232,8 @@ function openSlotsFor(weekStart, { baseSlots = [], plan = null, lessons = [], st
   const out  = [];
 
   const candidates = [
-    ...baseSlots.map(s => ({ di: s.di, t: s.t })),
-    ...(((plan && plan.extraSlots) || [])).map(s => ({ di: s.di, t: s.t })),
+    ...baseSlots.map(s => ({ di: s.di, t: s.t, br: s.br || null })),
+    ...(((plan && plan.extraSlots) || [])).map(s => ({ di: s.di, t: s.t, br: s.br || null })),
   ];
 
   candidates.forEach(s => {
@@ -231,7 +255,7 @@ function openSlotsFor(weekStart, { baseSlots = [], plan = null, lessons = [], st
       !cancelled.includes(l.sid) &&
       students.some(st => st.id === l.sid));
     if (taken) return;
-    out.push({ date, time: s.t, di: s.di });
+    out.push({ date, time: s.t, di: s.di, br: s.br || null });
   });
 
   return out.sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
@@ -668,11 +692,34 @@ function TeacherView({ ctx }) {
   );
 }
 
+// A branch marker small enough to sit inside a calendar block.
+function BranchTag({ branches, br, warn }) {
+  if (!branches || !branches.length) return null;
+  const name = branchName(branches, br);
+  if (!name) {
+    return warn ? <span style={{ ...S.badge('danger'), fontSize:9, padding:'1px 6px' }}>ללא שלוחה</span> : null;
+  }
+  return <span style={{ ...S.badge('default'), fontSize:9, padding:'1px 6px' }}>{name}</span>;
+}
+
+function BranchSelect({ branches, value, onChange, allowNone = true }) {
+  if (!branches || !branches.length) return null;
+  return (
+    <div style={{ marginBottom:10 }}>
+      <div style={S.label}>שלוחה</div>
+      <select style={S.input} value={value || ''} onChange={e => onChange(e.target.value || null)}>
+        {allowNone && <option value="">— ללא שלוחה —</option>}
+        {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
 // ── Pick a student for an hour ────────────────────────────────────────────────
 // Shared by both week calendars. Students who already have a lesson that week
 // sink to the bottom and say so, because the common mistake is booking a
 // make-up for someone who never missed anything.
-function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy }) {
+function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy, branches }) {
   const [q, setQ] = useState('');
   const ws = wkStart(slot.date);
 
@@ -697,6 +744,7 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
       </div>
       <div style={{ background:'#E6F1FB', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'var(--color-text-info)', direction:'rtl' }}>
         נוצר <strong>שיעור חד-פעמי</strong> בשעה הזו. המערכת הקבועה של התלמיד לא משתנה.
+        {branchName(branches, slot.br) && <> השעה נמצאת ב<strong>{branchName(branches, slot.br)}</strong>.</>}
       </div>
       <input style={{ ...S.input, marginBottom:10, direction:'rtl' }} placeholder="חיפוש לפי שם..."
         value={q} onChange={e => setQ(e.target.value)} />
@@ -714,6 +762,11 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
                 ? (stu.type === 'fixed' ? 'תלמיד קבוע · אין לו שיעור השבוע' : 'תלמיד נייד · לא נרשם השבוע')
                 : `כבר יש שיעור השבוע — יום ${DAY_HE[parseD(week[0].date).getDay()]} ${week[0].time}${week.length > 1 ? ` (+${week.length - 1})` : ''}`}
             </div>
+            {slot.br && stu.br && stu.br !== slot.br && (
+              <div style={{ fontSize:11, fontWeight:600, marginTop:3, color:'var(--color-text-warning)', direction:'rtl' }}>
+                ⚠ שייך ל{branchName(branches, stu.br)} — שיבוץ כאן חוצה שלוחות
+              </div>
+            )}
           </button>
         ))}
       </div>
@@ -727,13 +780,15 @@ function AssignStudentPicker({ slot, students, lessons, onAssign, onClose, busy 
 // hours can be filled from here, and an hour can be blocked mid-week when
 // something comes up. Both act on the week students are already looking at.
 function TeacherWeekTab({ ctx }) {
-  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, updLesson, setWeekBlock, setWeekExtra } = ctx;
+  const { lessons, students, TODAY, THIS_WK, pubThis, baseSlots, addLesson, updLesson, setWeekBlock, setWeekExtra,
+          branches = [], branchesOn = false, setSlotBranch } = ctx;
   const [selected, setSelected] = useState(null);   // a calendar item
   const [assigning, setAssigning] = useState(null); // {date,time,di}
   const [busy, setBusy] = useState(false);
   const [addingExtra, setAddingExtra] = useState(false);
   const [exDi, setExDi] = useState(parseD(TODAY).getDay());
   const [exT,  setExT]  = useState('09:00');
+  const [exBr, setExBr] = useState(null);
 
   // Which of this week's open hours are one-off additions rather than part of
   // the standing schedule — they get their own colour and can be taken back.
@@ -748,9 +803,33 @@ function TeacherWeekTab({ ctx }) {
     return `${String(Math.floor(e/60)).padStart(2,'0')}:${String(e%60).padStart(2,'0')}`;
   }
 
+  // Where an hour is, taken from the standing schedule or from this week's plan.
+  function brOfSlot(di, t) {
+    const base  = baseSlots.find(x => x.di === di && x.t === t);
+    if (base) return base.br || null;
+    const extra = (pubThis?.extraSlots || []).find(x => x.di === di && x.t === t);
+    return extra ? (extra.br || null) : null;
+  }
+
+  // She cannot be in two villages an hour apart. This does not block — plenty of
+  // real weeks have tight turnarounds she has already thought about — but an
+  // unnoticed one sends her driving mid-lesson.
+  function travelWarning(di, t, br) {
+    if (!branches.length || !br) return '';
+    const mins = x => { const [h,m] = x.split(':').map(Number); return h*60+m; };
+    const near = baseSlots
+      .filter(x => x.di === di && x.br && x.br !== br)
+      .filter(x => Math.abs(mins(x.t) - mins(t)) < 90);
+    if (!near.length) return '';
+    return `שים לב: ביום ${DAY_HE[di]} יש שעה ב"${branchName(branches, near[0].br)}" ב-${near[0].t}, פחות משעה וחצי מהשעה הזו.`;
+  }
+
   function saveExtra() {
     if (!isValidTime(exT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
-    setWeekExtra(THIS_WK, exDi, exT, true);
+    if (branches.length && !exBr && !confirm('לא בחרת שלוחה לשעה הזו. בזמן שהשלוחות פעילות היא לא תוצג לאף תלמיד. להוסיף בכל זאת?')) return;
+    const w = travelWarning(exDi, exT, exBr);
+    if (w && !confirm(`${w}\n\nלהוסיף בכל זאת?`)) return;
+    setWeekExtra(THIS_WK, exDi, exT, true, exBr);
     setAddingExtra(false);
   }
 
@@ -772,7 +851,8 @@ function TeacherWeekTab({ ctx }) {
     const put = (item) => { const k = `${item.date}_${item.time}`; if (!byKey.has(k)) byKey.set(k, item); };
 
     weekLessons.filter(l => isLive(l.status) && isValidTime(l.time))
-      .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
+      .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(),
+                          br: brOfSlot(parseD(l.date).getDay(), l.time), lesson:l }));
 
     (pubThis?.blockedSlots || []).filter(b => isValidTime(b.t)).forEach(b => {
       const date = dateOfDi(THIS_WK, b.di);
@@ -786,7 +866,7 @@ function TeacherWeekTab({ ctx }) {
       const gave = weekLessons.find(l => l.date===s.date && l.time===s.time
                                       && ['cancelled_justified','cancelled_unjustified','teacher_cancelled','no_show'].includes(l.status));
       const stu  = gave ? students.find(x => x.id === gave.sid) : null;
-      put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di,
+      put({ id:`open_${s.date}_${s.time}`, kind:'free', date:s.date, time:s.time, di:s.di, br:s.br,
             isExtra: extraKeys.has(`${s.di}_${s.time}`),
             freedBy:stu?.name || null, freedStatus:gave?.status || null });
     });
@@ -838,6 +918,11 @@ function TeacherWeekTab({ ctx }) {
         <div style={{ fontSize: strong ? 11 : 10.5, fontWeight: strong ? 700 : 500, color:fg,
                       overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
         <div style={{ fontSize: strong ? 10 : 9.5, color:fg, opacity: strong ? 1 : 0.85 }}>{item.time}</div>
+        {branches.length > 0 && item.kind !== 'blocked' && (
+          <div style={{ fontSize:8.5, color:fg, opacity:0.9, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>
+            {branchName(branches, item.br) || (branchesOn ? '⚠ ללא שלוחה' : '')}
+          </div>
+        )}
       </div>
     );
   }
@@ -887,6 +972,18 @@ function TeacherWeekTab({ ctx }) {
             יום {DAY_HE[selected.di]} · {dd(selected.date)} · {selected.time}
             <HolBadge date={selected.date} />
           </div>
+
+          {branches.length > 0 && selected.kind !== 'blocked' && (
+            <div style={{ background:'var(--color-background-secondary)', borderRadius:8, padding:'10px 12px', marginBottom:12, direction:'rtl' }}>
+              <BranchSelect branches={branches} value={selected.br}
+                onChange={br => { setSlotBranch(selected.di, selected.time, br); setSelected({ ...selected, br }); }} />
+              <div style={{ fontSize:11, color:'var(--color-text-secondary)', lineHeight:1.5, marginTop:-4 }}>
+                {branchesOn && !selected.br
+                  ? '⚠ בלי שלוחה השעה הזו לא מוצגת לאף תלמיד.'
+                  : 'שינוי כאן משנה את השעה הקבועה, בכל השבועות.'}
+              </div>
+            </div>
+          )}
 
           {selLesson && <StatusBadge status={selLesson.status} />}
           {selLesson?.reason && <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'10px 0 0', direction:'rtl' }}>סיבה: {selLesson.reason}</p>}
@@ -968,7 +1065,7 @@ function TeacherWeekTab({ ctx }) {
       )}
 
       {assigning && (
-        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy}
+        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy} branches={branches}
           onAssign={assign} onClose={() => { if (!busy) setAssigning(null); }} />
       )}
 
@@ -990,6 +1087,7 @@ function TeacherWeekTab({ ctx }) {
             <div style={S.label}>שעת התחלה (צעדים של 5 דקות)</div>
             <input type="time" step="300" style={S.input} value={exT} onChange={e => setExT(e.target.value)} />
           </div>
+          <BranchSelect branches={branches} value={exBr} onChange={setExBr} />
           <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
             שיעור: {exT} – {endTime(exT)} (45 דקות)
             {hoursUntil(dateOfDi(THIS_WK, exDi), exT) <= 0 && <span style={{ color:'var(--color-text-warning)' }}> · השעה הזו כבר עברה</span>}
@@ -1009,7 +1107,7 @@ function TeacherWeekTab({ ctx }) {
 // Tap empty area → pre-filled extra slot modal.
 // Block/remove options for ALL slot types including empty slots.
 function TeacherNextWeekTab({ ctx }) {
-  const { students, lessons, NEXT_WK, pubNext, updLesson, addLesson, pubWeek, baseSlots, addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek, fixOrphanedSlot } = ctx;
+  const { students, lessons, NEXT_WK, pubNext, updLesson, addLesson, pubWeek, baseSlots, addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek, fixOrphanedSlot, branches = [], branchesOn = false } = ctx;
   const [cancelledIds, setCancelledIds] = useState(pubNext?.cancelledIds || []);
   const [blockedSlots, setBlockedSlots] = useState(pubNext?.blockedSlots || []);
   const [extraSlots, setExtraSlots]     = useState(pubNext?.extraSlots   || []);
@@ -1026,6 +1124,7 @@ function TeacherNextWeekTab({ ctx }) {
   const [selected, setSelected]         = useState(null);
   const [assigning, setAssigning]       = useState(null); // {date,time,di}
   const [busy, setBusy]                 = useState(false);
+  const [newSlotBr, setNewSlotBr]       = useState(null);
 
   // Always show Sunday(0) → Thursday(4), plus any extra-slot days
   const teachingDays = useMemo(() => {
@@ -1057,7 +1156,7 @@ function TeacherNextWeekTab({ ctx }) {
       const flexStu    = bookedStu && bookedStu.id !== (slot.sid || '') ? bookedStu : null;
       const isOrphaned = !!(slot.sid && !fixedStu);
       const isPermOpen = !slot.sid || isOrphaned;  // orphaned slots treated as open
-      items.push({ id:key, date, time:slot.t, di:slot.di, lesson, fixedStu, flexStu, isCancelled, isBlocked, isExtra:false, isPermOpen, isOrphaned, isEmpty:!fixedStu&&!lesson&&!isBlocked&&!isOrphaned });
+      items.push({ id:key, date, time:slot.t, di:slot.di, br:slot.br || null, lesson, fixedStu, flexStu, isCancelled, isBlocked, isExtra:false, isPermOpen, isOrphaned, isEmpty:!fixedStu&&!lesson&&!isBlocked&&!isOrphaned });
     });
 
     extraSlots.forEach(slot => {
@@ -1069,7 +1168,7 @@ function TeacherNextWeekTab({ ctx }) {
       used.add(key);
       const lesson   = lessons.find(l => l.date===date && l.time===slot.t && isLive(l.status));
       const bookedStu= lesson ? students.find(s => s.id===lesson.sid) : null;
-      items.push({ id:key, date, time:slot.t, di:slot.di, lesson, fixedStu:null, flexStu:bookedStu||null, isCancelled:false, isBlocked:false, isExtra:true, isEmpty:!lesson });
+      items.push({ id:key, date, time:slot.t, di:slot.di, br:slot.br || null, lesson, fixedStu:null, flexStu:bookedStu||null, isCancelled:false, isBlocked:false, isExtra:true, isEmpty:!lesson });
     });
 
     // Also show lessons that exist in Firestore but have no matching baseSlot or extraSlot
@@ -1118,6 +1217,11 @@ function TeacherNextWeekTab({ ctx }) {
       }}>
         <div style={{ fontSize:11, fontWeight:700, color:fg, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>{label}</div>
         <div style={{ fontSize:10, color:fg }}>{item.time}</div>
+        {branches.length > 0 && !showBlocked && (
+          <div style={{ fontSize:8.5, color:fg, opacity:0.9, overflow:'hidden', whiteSpace:'nowrap', textOverflow:'ellipsis' }}>
+            {branchName(branches, item.br) || (branchesOn ? '⚠ ללא שלוחה' : '')}
+          </div>
+        )}
       </div>
     );
   }
@@ -1157,8 +1261,10 @@ function TeacherNextWeekTab({ ctx }) {
 
   function addExtraSlot() {
     if (!isValidTime(newSlotT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
+    if (branches.length && !newSlotBr &&
+        !confirm('לא בחרת שלוחה לשעה הזו. בזמן שהשלוחות פעילות היא לא תוצג לאף תלמיד. להוסיף בכל זאת?')) return;
     if (!extraSlots.find(e => e.di===newSlotDi && e.t===newSlotT)) {
-      setExtraSlots(es => [...es, { di:newSlotDi, t:newSlotT }]);
+      setExtraSlots(es => [...es, { di:newSlotDi, t:newSlotT, br:newSlotBr || null }]);
     }
     setAddingSlot(false);
   }
@@ -1253,6 +1359,7 @@ function TeacherNextWeekTab({ ctx }) {
         <Modal onClose={() => setSelected(null)}>
           <div style={{ fontSize:15, fontWeight:600, marginBottom:4, direction:'rtl' }}>
             יום {DAY_HE[selected.di]} · {selected.time}
+            {branches.length > 0 && <> <BranchTag branches={branches} br={selected.br} warn={branchesOn} /></>}
           </div>
 
           {selected.isBlocked && (
@@ -1444,6 +1551,7 @@ function TeacherNextWeekTab({ ctx }) {
             <div style={S.label}>שעת התחלה</div>
             <input type="time" step="300" style={S.input} value={newSlotT} onChange={e => setNewSlotT(e.target.value)} />
           </div>
+          <BranchSelect branches={branches} value={newSlotBr} onChange={setNewSlotBr} />
           <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
             שיעור: {newSlotT} – {endTime(newSlotT)} (45 דקות)
           </div>
@@ -1452,7 +1560,7 @@ function TeacherNextWeekTab({ ctx }) {
             <button style={{ ...S.btn('success'), background:'#ccfbf1', color:'#0f766e', borderColor:'#5eead4' }}
               onClick={() => {
                 if (!isValidTime(newSlotT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
-                addBaseSlot(newSlotDi, newSlotT, null); setAddingOpenSlot(false);
+                addBaseSlot(newSlotDi, newSlotT, null, newSlotBr); setAddingOpenSlot(false);
               }}>
               🔓 הוסף שעה קבועה
             </button>
@@ -1474,6 +1582,7 @@ function TeacherNextWeekTab({ ctx }) {
             <div style={S.label}>שעת התחלה (צעדים של 5 דקות)</div>
             <input type="time" step="300" style={S.input} value={newSlotT} onChange={e => setNewSlotT(e.target.value)} />
           </div>
+          <BranchSelect branches={branches} value={newSlotBr} onChange={setNewSlotBr} />
           <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:16, direction:'rtl' }}>
             שיעור: {newSlotT} – {endTime(newSlotT)} (45 דקות)
           </div>
@@ -1485,7 +1594,7 @@ function TeacherNextWeekTab({ ctx }) {
       )}
 
       {assigning && (
-        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy}
+        <AssignStudentPicker slot={assigning} students={students} lessons={lessons} busy={busy} branches={ctx.branches}
           onAssign={async stu => {
             if (busy) return;
             setBusy(true);
@@ -1631,19 +1740,21 @@ function OneTimeLessonAdder({ sid, addLesson, lessons, students, THIS_WK, NEXT_W
 // with the published board and with the taken-hours map, so saving here has to
 // rewrite those too — which is why it goes through updateStudent rather than
 // touching the document directly.
-function EditStudentModal({ stu, onClose, onSave }) {
+function EditStudentModal({ stu, branches, onClose, onSave }) {
   const [name,   setName]   = useState(stu.name || '');
   const [phone,  setPhone]  = useState(stu.phone || '');
   const [parent, setParent] = useState(stu.parent || '');
+  const [br,     setBr]     = useState(stu.br || null);
   const [busy,   setBusy]   = useState(false);
 
   const clean = name.trim();
-  const changed = clean !== (stu.name || '') || phone.trim() !== (stu.phone || '') || parent.trim() !== (stu.parent || '');
+  const changed = clean !== (stu.name || '') || phone.trim() !== (stu.phone || '')
+               || parent.trim() !== (stu.parent || '') || (br || null) !== (stu.br || null);
 
   async function save() {
     if (!clean || busy) return;
     setBusy(true);
-    await onSave({ name: clean, phone: phone.trim(), parent: parent.trim() });
+    await onSave({ name: clean, phone: phone.trim(), parent: parent.trim(), br: br || null });
     setBusy(false);
     onClose();
   }
@@ -1664,8 +1775,10 @@ function EditStudentModal({ stu, onClose, onSave }) {
         onChange={e => setPhone(e.target.value)} placeholder="למשל 0501234567" />
 
       <div style={S.label}>שם ההורה (אופציונלי)</div>
-      <input style={{ ...S.input, marginBottom:6, direction:'rtl' }} value={parent}
+      <input style={{ ...S.input, marginBottom:10, direction:'rtl' }} value={parent}
         onChange={e => setParent(e.target.value)} placeholder="שם ההורה" />
+
+      <BranchSelect branches={branches} value={br} onChange={setBr} />
 
       <div style={{ fontSize:11, color:'var(--color-text-secondary)', margin:'0 0 16px', direction:'rtl', lineHeight:1.6 }}>
         השם והטלפון מופיעים גם בלוח הכיתה של התלמידים האחרים (אם שיתוף הקשר מופעל).
@@ -1687,13 +1800,14 @@ function EditStudentModal({ stu, onClose, onSave }) {
 // Registration links are for new enquiries; a teacher setting up her studio
 // needs to enter the students she already teaches without filling in the
 // public form on their behalf.
-function AddStudentModal({ onClose, onSave }) {
+function AddStudentModal({ branches, branchesOn, onClose, onSave }) {
   const [name,   setName]   = useState('');
   const [phone,  setPhone]  = useState('');
   const [parent, setParent] = useState('');
   const [type,   setType]   = useState('fixed');
   const [di,     setDi]     = useState(0);
   const [t,      setT]      = useState('14:00');
+  const [br,     setBr]     = useState(null);
   const [share,  setShare]  = useState(true);
 
   const ok = name.trim().length > 1 && (type === 'flexible' || isValidTime(t));
@@ -1751,9 +1865,16 @@ function AddStudentModal({ onClose, onSave }) {
         </div>
       </label>
 
+      <BranchSelect branches={branches} value={br} onChange={setBr} />
+      {branchesOn && !br && branches && branches.length > 0 && (
+        <div style={{ fontSize:11, color:'var(--color-text-warning)', marginBottom:10, lineHeight:1.5, direction:'rtl' }}>
+          בלי שלוחה התלמיד לא יראה שום שעה בלוח.
+        </div>
+      )}
+
       <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8, opacity: ok ? 1 : 0.45 }}
         disabled={!ok}
-        onClick={() => onSave({ name, phone, parent, type, share,
+        onClick={() => onSave({ name, phone, parent, type, share, br,
                                 di: type==='fixed'?di:null, t: type==='fixed'?t:null })}>
         ✅ הוסף וצור קוד אישי
       </button>
@@ -1818,6 +1939,7 @@ function TeacherStudentsTab({ ctx }) {
               <div style={{ fontSize:18, fontWeight:500, marginBottom:4 }}>{stu.name}</div>
               <div style={{ fontSize:13, color:'var(--color-text-secondary)', marginBottom:4 }}>
                 {stu.type==='fixed'?'תלמיד קבוע':'תלמיד נייד'} · קוד: {stu.code}
+                {(ctx.branches || []).length > 0 && <> · <BranchTag branches={ctx.branches} br={stu.br} warn={ctx.branchesOn} /></>}
               </div>
               <div style={{ fontSize:12.5, color:'var(--color-text-secondary)', marginBottom:10, direction:'rtl' }}>
                 {stu.phone ? <span style={{ direction:'ltr', unicodeBidi:'embed' }}>{stu.phone}</span> : 'אין טלפון'}
@@ -2040,7 +2162,7 @@ function TeacherStudentsTab({ ctx }) {
       )}
 
       {editModal && (
-        <EditStudentModal stu={stu} onClose={() => setEditModal(false)}
+        <EditStudentModal stu={stu} branches={ctx.branches} onClose={() => setEditModal(false)}
           onSave={patch => updateStudent(stu.id, patch)} />
       )}
 
@@ -2083,7 +2205,7 @@ function TeacherStudentsTab({ ctx }) {
         onClick={() => setAddModal(true)}>
         ＋ הוסף תלמיד
       </button>
-      {addModal && <AddStudentModal onClose={() => setAddModal(false)}
+      {addModal && <AddStudentModal branches={ctx.branches} branchesOn={ctx.branchesOn} onClose={() => setAddModal(false)}
                                     onSave={d => { ctx.addStudent(d); setAddModal(false); }} />}
       {students.length === 0 && (
         <div style={{ ...S.card, textAlign:'center', marginTop:10 }}>
@@ -2215,11 +2337,13 @@ function ApprovedCodeModal({ info, template, onClose }) {
 
 // ── Teacher: Cancellation Requests + Pending Registrations ──────────────────
 function TeacherRequestsTab({ ctx }) {
-  const { lessons, students, updLesson, resolveMove, pendingStudents, approveStudent, rejectStudent, pubNext, NEXT_WK } = ctx;
+  const { lessons, students, updLesson, resolveMove, pendingStudents, approveStudent, rejectStudent, pubNext, NEXT_WK,
+          branches = [], branchesOn = false } = ctx;
   const [approvingId, setApprovingId] = useState(null);
   const [assignType,  setAssignType]  = useState('flexible');
   const [assignDi,    setAssignDi]    = useState(1);
   const [assignT,     setAssignT]     = useState('09:00');
+  const [assignBr,    setAssignBr]    = useState(null);
 
   const pendingCancel = lessons.filter(l => l.status==='pending_cancel').sort((a,b) => a.date.localeCompare(b.date));
   const pendingMove   = lessons.filter(l => l.status==='pending_move').sort((a,b) => a.date.localeCompare(b.date));
@@ -2271,6 +2395,12 @@ function TeacherRequestsTab({ ctx }) {
                         onClick={() => setAssignType(v)}>{l}</button>
                     ))}
                   </div>
+                  <BranchSelect branches={branches} value={assignBr} onChange={setAssignBr} />
+                  {branchesOn && !assignBr && branches.length > 0 && (
+                    <div style={{ fontSize:11, color:'var(--color-text-warning)', marginBottom:10, lineHeight:1.5 }}>
+                      בלי שלוחה התלמיד לא יראה שום שעה בלוח.
+                    </div>
+                  )}
                   {assignType==='fixed' && (
                     <div style={{ display:'flex', gap:8, marginBottom:10 }}>
                       <div style={{ flex:1 }}>
@@ -2288,7 +2418,7 @@ function TeacherRequestsTab({ ctx }) {
                   <div style={{ display:'flex', gap:8 }}>
                     <button style={S.btn('ghost')} onClick={() => setApprovingId(null)}>ביטול</button>
                     <button style={{ ...S.btn('success'), flex:1 }} onClick={() => {
-                      approveStudent(ps.id, ps, assignType, assignType==='fixed'?assignDi:null, assignType==='fixed'?assignT:null);
+                      approveStudent(ps.id, ps, assignType, assignType==='fixed'?assignDi:null, assignType==='fixed'?assignT:null, assignBr);
                       setApprovingId(null);
                     }}>✓ אשר תלמיד</button>
                   </div>
@@ -2396,7 +2526,9 @@ function TeacherRequestsTab({ ctx }) {
 // person who set the system up: her studio's name, her registration link, and
 // her own holiday calendar.
 function TeacherSettingsTab({ ctx }) {
-  const { teacher, updateTeacher } = ctx;
+  const { teacher, updateTeacher, students = [], branches = [], branchesOn = false, setBranches, setBranchesOn, setDayBranch } = ctx;
+  const [newBranch, setNewBranch] = useState('');
+  const [dayPick,   setDayPick]   = useState({});   // di -> branch id being applied
   const [studio, setStudio] = useState(teacher?.studioName || '');
   const [name,   setName]   = useState(teacher?.name || '');
   const [phone,  setPhone]  = useState(teacher?.phone || '');
@@ -2416,6 +2548,24 @@ function TeacherSettingsTab({ ctx }) {
   async function saveProfile() {
     await updateTeacher({ studioName: studio.trim(), name: name.trim(), phone: phone.trim() });
     setSaved('פרטי האולפן נשמרו'); setTimeout(() => setSaved(''), 2500);
+  }
+
+  // What is left to tag. Counted from the real data, not remembered separately,
+  // so it cannot drift out of date.
+  const untaggedStats = useMemo(() => {
+    const slots = (teacher?.slots || []).filter(x => !x.br).length;
+    const stu   = (students || []).filter(x => !x.br).length;
+    const perBranch = {};
+    (teacher?.slots || []).forEach(x => { if (x.br) perBranch[x.br] = (perBranch[x.br] || 0) + 1; });
+    return { slots, students: stu, perBranch, ready: slots === 0 && stu === 0 };
+  }, [teacher, students]);
+
+  function addBranch() {
+    const name = newBranch.trim();
+    if (!name) return;
+    if ((branches || []).some(b => b.name === name)) { setNewBranch(''); return; }
+    setBranches([...(branches || []), { id: genCode(5), name }]);
+    setNewBranch('');
   }
 
   async function saveWelcome() {
@@ -2462,6 +2612,94 @@ function TeacherSettingsTab({ ctx }) {
         </div>
         <button style={{ ...S.btn('primary'), width:'100%' }} onClick={saveProfile}>שמור</button>
         {saved && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{saved}</div>}
+      </div>
+
+      {/* ── branches ── */}
+      {/* Defining and enforcing are separate on purpose: the moment enforcement
+          starts, every untagged hour disappears from every student's board, so
+          the teacher needs room to tag first and switch on after. */}
+      <div style={{ ...S.card, marginTop:10 }}>
+        <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>שלוחות</div>
+        <div style={{ fontSize:12, color:'var(--color-text-secondary)', marginBottom:12, lineHeight:1.6 }}>
+          למורה שמלמדת בכמה יישובים. כל שעה במערכת משויכת לשלוחה, וכל תלמיד משויך לשלוחה
+          אחת — כך שהוא רואה ויכול לתפוס רק שעות שבאמת קיימות אצלו.
+          אם את מלמדת במקום אחד, אין צורך בזה בכלל.
+        </div>
+
+        {branches.length > 0 && branches.map(b => (
+          <div key={b.id} style={{ ...S.row, gap:8, marginBottom:6 }}>
+            <input style={{ ...S.input, flex:1, direction:'rtl' }} value={b.name}
+              onChange={e => setBranches(branches.map(x => x.id===b.id ? { ...x, name:e.target.value } : x))} />
+            <button style={{ ...S.btn('danger'), padding:'7px 12px' }}
+              onClick={() => {
+                const used = untaggedStats.perBranch[b.id] || 0;
+                if (used && !confirm(`${used} שעות משויכות ל"${b.name}". למחוק את השלוחה? השעות האלה יישארו ללא שלוחה.`)) return;
+                setBranches(branches.filter(x => x.id !== b.id));
+              }}>🗑</button>
+          </div>
+        ))}
+
+        <div style={{ ...S.row, gap:8, marginTop: branches.length ? 10 : 0, marginBottom:12 }}>
+          <input style={{ ...S.input, flex:1, direction:'rtl' }} value={newBranch}
+            placeholder="שם שלוחה — למשל מעגן מיכאל"
+            onChange={e => setNewBranch(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') addBranch(); }} />
+          <button style={{ ...S.btn('success'), padding:'7px 14px' }} onClick={addBranch}>＋ הוסף</button>
+        </div>
+
+        {branches.length > 0 && (
+          <>
+            {/* Tagging a whole day is how a real week is usually shaped. */}
+            <div style={{ ...S.label, marginBottom:6 }}>שיוך מהיר של יום שלם</div>
+            <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginBottom:8, lineHeight:1.6 }}>
+              מסמן את כל השעות הקיימות באותו יום. יום מפוצל — בוקר בשלוחה אחת וצהריים באחרת —
+              משייכים כאן לפי הרוב, ואז מתקנים את השעות החורגות מהלוח עצמו.
+            </div>
+            {[0,1,2,3,4,5].map(di => (
+              <div key={di} style={{ ...S.row, gap:8, marginBottom:6 }}>
+                <span style={{ fontSize:13, width:64 }}>יום {DAY_HE[di]}</span>
+                <select style={{ ...S.input, flex:1 }} value={dayPick[di] || ''}
+                  onChange={e => setDayPick(d => ({ ...d, [di]: e.target.value }))}>
+                  <option value="">בחר שלוחה…</option>
+                  {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+                <button style={{ ...S.btn('info'), padding:'7px 12px', fontSize:12,
+                                 opacity: dayPick[di] ? 1 : 0.4 }}
+                  disabled={!dayPick[di]}
+                  onClick={() => setDayBranch(di, dayPick[di])}>שייך</button>
+              </div>
+            ))}
+
+            {/* What is still missing, stated plainly before anything is enforced. */}
+            <div style={{ background: untaggedStats.ready ? 'var(--color-background-success)' : 'var(--color-background-warning)',
+                          borderRadius:8, padding:'10px 12px', margin:'12px 0' }}>
+              <div style={{ fontSize:12.5, color: untaggedStats.ready ? 'var(--color-text-success)' : 'var(--color-text-warning)', lineHeight:1.7 }}>
+                {untaggedStats.ready
+                  ? '✓ כל השעות וכל התלמידים משויכים לשלוחה.'
+                  : <>עדיין ללא שלוחה: <strong>{untaggedStats.slots}</strong> שעות ו-<strong>{untaggedStats.students}</strong> תלמידים.
+                     כל עוד האכיפה פעילה, שעה ללא שלוחה לא מוצגת לאף תלמיד.</>}
+              </div>
+            </div>
+
+            <label style={{ display:'flex', alignItems:'flex-start', gap:10, cursor:'pointer' }}>
+              <input type="checkbox" checked={branchesOn}
+                     onChange={e => {
+                       if (e.target.checked && !untaggedStats.ready &&
+                           !confirm(`יש עדיין ${untaggedStats.slots} שעות ו-${untaggedStats.students} תלמידים ללא שלוחה. להפעיל בכל זאת? הם לא יופיעו אצל התלמידים עד שיסודרו.`)) return;
+                       setBranchesOn(e.target.checked);
+                     }}
+                     style={{ width:16, height:16, margin:'3px 0 0' }} />
+              <div>
+                <div style={{ fontSize:13, fontWeight:600 }}>הפעל שלוחות</div>
+                <div style={{ fontSize:11, color:'var(--color-text-secondary)', marginTop:2, lineHeight:1.5 }}>
+                  {branchesOn
+                    ? 'פעיל — כל תלמיד רואה בלוח רק את השעות של השלוחה שלו.'
+                    : 'כבוי — הכל מתנהג כרגיל, והשיוכים נשמרים בצד עד שתפעילי.'}
+                </div>
+              </div>
+            </label>
+          </>
+        )}
       </div>
 
       {/* ── the message that carries a student's link ── */}
@@ -2618,19 +2856,21 @@ function boardSlotsFor(weekStart, board, claims) {
       else if (held)                        state = 'taken';
       else if (!claim && s.state==='taken') state = 'taken';
       return {
-        di: s.di, t: s.t, date: dateOfDi(weekStart, s.di), state,
+        di: s.di, t: s.t, br: s.br || null, date: dateOfDi(weekStart, s.di), state,
         name:  held ? claim.name  : (state === 'taken' ? (s.name  || null) : null),
         phone: held ? (claim.phone || '') : (state === 'taken' ? (s.phone || '') : ''),
       };
     });
 }
 
-function freeSlotsFor(weekStart, board, claims, { after } = {}) {
+function freeSlotsFor(weekStart, board, claims, { after, studentBr } = {}) {
+  const on = !!(board && board.branchesOn);
   return boardSlotsFor(weekStart, board, claims)
     .filter(s => s.state === 'free')
+    .filter(s => slotVisibleTo(s, studentBr, on))
     .filter(s => !getHoliday(s.date))
     .filter(s => !after || hoursUntil(s.date, s.t) >= after)
-    .map(s => ({ date:s.date, time:s.t, di:s.di }))
+    .map(s => ({ date:s.date, time:s.t, di:s.di, br:s.br || null }))
     .sort((a, b) => a.di !== b.di ? a.di - b.di : a.time.localeCompare(b.time));
 }
 
@@ -2670,21 +2910,21 @@ function StudentMineTab({ ctx }) {
 
   // Slots still open next week, once the teacher has published it.
   const availableSlots = useMemo(
-    () => pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK]) : [],
+    () => pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK], { studentBr: me.br }) : [],
     [pubNext, boardNext, claims, NEXT_WK]
   );
 
   // Slots still open in the current week — only those at least 2h away.
   const thisWkOpenSlots = useMemo(
-    () => freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2 }),
+    () => freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2, studentBr: me.br }),
     [boardThis, claims, THIS_WK]
   );
 
   function getMoveSlots(lesson) {
     const same = s => s.date === lesson.date && s.time === lesson.time;
     return {
-      thisWk: freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2 }).filter(s => !same(s)),
-      nextWk: pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK]).filter(s => !same(s)) : [],
+      thisWk: freeSlotsFor(THIS_WK, boardThis, claims[THIS_WK], { after: 2, studentBr: me.br }).filter(s => !same(s)),
+      nextWk: pubNext ? freeSlotsFor(NEXT_WK, boardNext, claims[NEXT_WK], { studentBr: me.br }).filter(s => !same(s)) : [],
     };
   }
 
@@ -2963,7 +3203,16 @@ function StudentBoardTab({ ctx }) {
   const board    = boards[activeWk] || null;
   const cl       = claims[activeWk] || {};
 
-  const slots = useMemo(() => boardSlotsFor(activeWk, board, cl), [activeWk, board, cl]);
+  // A student sees their own branch, and nothing else — except an hour that is
+  // actually theirs, which the teacher may have placed anywhere on purpose.
+  const branchOn = !!(board && board.branchesOn);
+  const myBranch = branchName(board?.branches, me.br);
+  const slots = useMemo(() => {
+    const all = boardSlotsFor(activeWk, board, cl);
+    if (!branchOn) return all;
+    const mineNow = new Set(lessons.filter(l => l.sid === me.id && isLive(l.status)).map(l => `${l.date}_${l.time}`));
+    return all.filter(s => slotVisibleTo(s, me.br, true) || mineNow.has(`${s.date}_${s.t}`));
+  }, [activeWk, board, cl, branchOn, me.br, me.id, lessons]);
 
   const teachingDays = useMemo(() => {
     const diSet = new Set(slots.map(s => s.di));
@@ -3068,6 +3317,15 @@ function StudentBoardTab({ ctx }) {
           </button>
         ))}
       </div>
+      {branchOn && (
+        <div style={{ ...S.card, background:'var(--color-background-info)', border:'1.5px solid #B5D4F4', marginBottom:10, padding:'9px 12px' }}>
+          <div style={{ fontSize:12.5, color:'var(--color-text-info)', direction:'rtl' }}>
+            {myBranch
+              ? <>📍 השעות המוצגות הן של <strong>{myBranch}</strong> בלבד.</>
+              : <>עדיין לא שויכת לשלוחה — פנה למורה כדי לראות את השעות שלך.</>}
+          </div>
+        </div>
+      )}
       <div style={{ ...S.row, gap:12, marginBottom:10, flexWrap:'wrap' }}>
         {[['#dbeafe','#93c5fd','תפוס'],['#f0fdf4','#86efac','פנוי'],['#fef9c3','#fde68a','השיעור שלי']].map(([bg,bd,l]) => (
           <div key={l} style={{ ...S.row, gap:4 }}>
@@ -3728,13 +3986,13 @@ function MusicScheduler() {
         // Only for students whose contact sharing is on. Never a code.
         if (stu.shareContact !== false) phone = stu.phone || '';
       }
-      out.push({ di: sl.di, t: sl.t, state, name, phone });
+      out.push({ di: sl.di, t: sl.t, br: sl.br || null, state, name, phone });
     });
 
     (extraSlots || []).forEach(sl => {
       const key = `${sl.di}_${sl.t}`;
       if (seen.has(key)) return; seen.add(key);
-      out.push({ di: sl.di, t: sl.t, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null, phone: '' });
+      out.push({ di: sl.di, t: sl.t, br: sl.br || null, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null, phone: '' });
     });
 
     return out;
@@ -3770,6 +4028,8 @@ function MusicScheduler() {
         teacherId: teacherUid, weekStart: ws, note: note || '',
         studioName: teacher?.studioName || '',
         teacherPhone: teacher?.phone || '',
+        branches: teacher?.branches || [],
+        branchesOn: !!teacher?.branchesOn,
         slots: buildBoardSlots(cancelledIds, blockedSlots, extraSlots),
         holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
         publishedAt: new Date().toISOString(),
@@ -3796,9 +4056,9 @@ function MusicScheduler() {
 
   // ── recurring schedule ────────────────────────────────────────────────────
   // Each of these is one or two writes. Nothing walks the calendar.
-  async function addBaseSlot(di, t, sid = null) {
+  async function addBaseSlot(di, t, sid = null, br = null) {
     const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
-                   { di, t, sid: sid || null, since: TODAY }];
+                   { di, t, sid: sid || null, br: br || null, since: TODAY }];
     const batch = db.batch();
     batch.set(teacherRef(), { slots }, { merge:true });
     if (sid) batch.update(studentRef(sid), { type:'fixed', di, t });
@@ -3816,11 +4076,13 @@ function MusicScheduler() {
     await batch.commit().catch(e => console.error('removeBaseSlot', e));
   }
 
-  async function moveBaseSlot(oldDi, oldT, newDi, newT) {
+  async function moveBaseSlot(oldDi, oldT, newDi, newT, newBr) {
     const slot = (teacher?.slots || []).find(s => s.di === oldDi && s.t === oldT);
     if (!slot) return;
     const slots = (teacher?.slots || []).map(s =>
-      s.di === oldDi && s.t === oldT ? { ...s, di:newDi, t:newT, since: TODAY } : s);
+      s.di === oldDi && s.t === oldT
+        ? { ...s, di:newDi, t:newT, br: newBr !== undefined ? newBr : (s.br || null), since: TODAY }
+        : s);
     const batch = db.batch();
     batch.set(teacherRef(), { slots }, { merge:true });
     if (slot.sid && students.some(s => s.id === slot.sid)) {
@@ -3832,6 +4094,23 @@ function MusicScheduler() {
   function fixOrphanedSlot(di, t) {
     const slots = (teacher?.slots || []).map(s => s.di === di && s.t === t ? { ...s, sid:null } : s);
     return teacherRef().set({ slots }, { merge:true }).catch(e => console.error(e));
+  }
+
+  // ── branches ──────────────────────────────────────────────────────────────
+  function setBranches(list)  { return updateTeacher({ branches: list }); }
+  function setBranchesOn(on)  { return updateTeacher({ branchesOn: !!on }); }
+
+  // Assigning an existing hour to a branch, from anywhere in the app.
+  function setSlotBranch(di, t, br) {
+    const slots = (teacher?.slots || []).map(s => (s.di === di && s.t === t) ? { ...s, br: br || null } : s);
+    return teacherRef().set({ slots }, { merge:true }).catch(e => console.error('setSlotBranch', e));
+  }
+
+  // Tag a whole day at once — the usual shape of a real week, where a village
+  // owns a day. Thursday, which is split, is then fixed hour by hour.
+  function setDayBranch(di, br) {
+    const slots = (teacher?.slots || []).map(s => s.di === di ? { ...s, br: br || null } : s);
+    return teacherRef().set({ slots }, { merge:true }).catch(e => console.error('setDayBranch', e));
   }
 
   // ── students ──────────────────────────────────────────────────────────────
@@ -3875,6 +4154,8 @@ function MusicScheduler() {
       teacherId: teacherUid, weekStart: ws, note: plan.note || '',
       studioName: teacher?.studioName || '',
       teacherPhone: teacher?.phone || '',
+      branches: teacher?.branches || [],
+      branchesOn: !!teacher?.branchesOn,
       slots: buildBoardSlots(plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
       holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
       publishedAt: new Date().toISOString(),
@@ -3914,14 +4195,14 @@ function MusicScheduler() {
   // morning". It adds to the same week plan, so the hour behaves like any
   // other open hour — bookable by the teacher, visible to students — but only
   // for that one week.
-  async function setWeekExtra(ws, di, t, on) {
+  async function setWeekExtra(ws, di, t, on, br) {
     try {
       const published = !!teacher?.weekPlans?.[ws];
       const cur  = teacher?.weekPlans?.[ws] || { weekStart:ws, cancelledIds:[], blockedSlots:[], extraSlots:[], note:'' };
       const rest = (cur.extraSlots || []).filter(e => !(e.di === di && e.t === t));
       const plan = {
         ...cur, weekStart: ws,
-        extraSlots: on ? [...rest, { di, t }] : rest,
+        extraSlots: on ? [...rest, { di, t, br: br || null }] : rest,
         // Adding an hour back that was blocked earlier in the week should not
         // leave it blocked, or it would be added and instantly hidden.
         blockedSlots: on ? (cur.blockedSlots || []).filter(b => !(b.di === di && b.t === t)) : (cur.blockedSlots || []),
@@ -4069,7 +4350,10 @@ function MusicScheduler() {
   function removeSecondSlot(sid) {
     return studentRef(sid).update({ secondSlot: null }).catch(e => console.error(e));
   }
-  function changeToFixed(sid, di, t) { return addBaseSlot(di, t, sid); }
+  function changeToFixed(sid, di, t) {
+    const stu = enrichedStudents.find(s => s.id === sid);
+    return addBaseSlot(di, t, sid, stu?.br || null);
+  }
 
   async function changeToFlexible(sid, keepSlotOpen) {
     const slot = (teacher?.slots || []).find(s => s.sid === sid);
@@ -4096,14 +4380,14 @@ function MusicScheduler() {
   }
 
   // Shared by "approve a registration" and "add a student myself".
-  async function createStudent({ name, phone, parent, type, di, t, share }, pendingId) {
+  async function createStudent({ name, phone, parent, type, di, t, share, br }, pendingId) {
     const code  = await allocCode();
     const fixed = type === 'fixed' && di != null && t;
     const batch = db.batch();
     batch.set(studentRef(code), {
       teacherId: teacherUid, code, boardKey: teacher?.boardKey || '',
       name: name.trim(), phone: phone || '', parent: parent || '',
-      shareContact: share !== false,
+      shareContact: share !== false, br: br || null,
       type: fixed ? 'fixed' : 'flexible', status: 'active',
       di: fixed ? di : null, t: fixed ? t : null,
       secondSlot: null, createdAt: new Date().toISOString(),
@@ -4111,17 +4395,17 @@ function MusicScheduler() {
     if (pendingId) batch.delete(db.collection('pending_students').doc(pendingId));
     if (fixed) {
       const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
-                     { di, t, sid: code, since: TODAY }];
+                     { di, t, sid: code, br: br || null, since: TODAY }];
       batch.set(teacherRef(), { slots }, { merge:true });
     }
     await batch.commit();
     setApprovedInfo({ name: name.trim(), code, phone: phone || '' });
   }
 
-  async function approveStudent(pendingId, ps, assignType, aDi, aT) {
+  async function approveStudent(pendingId, ps, assignType, aDi, aT, aBr) {
     try {
       await createStudent({ name:ps.name, phone:ps.phone, parent:ps.parent,
-                            type:assignType, di:aDi, t:aT }, pendingId);
+                            type:assignType, di:aDi, t:aT, br:aBr }, pendingId);
     } catch (e) { console.error('approveStudent', e); alert('אישור התלמיד נכשל. נסה שוב.'); }
   }
 
@@ -4185,7 +4469,9 @@ function MusicScheduler() {
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
-    addStudent, setShareContact, updateStudent, updateTeacher, showCode: (name, code, phone) => setApprovedInfo({ name, code, phone }),
+    addStudent, setShareContact, updateStudent, updateTeacher,
+    branches: teacher?.branches || [], branchesOn: !!teacher?.branchesOn,
+    setBranches, setBranchesOn, setSlotBranch, setDayBranch, showCode: (name, code, phone) => setApprovedInfo({ name, code, phone }),
     teacher, me, logout,
   };
 
