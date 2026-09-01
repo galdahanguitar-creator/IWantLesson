@@ -93,6 +93,40 @@ function weeksBetween(from, to, cap = 16) {
   return out;
 }
 
+// ── When a recurring hour is in force ────────────────────────────────────────
+// A recurring hour is not eternal. It starts when the teacher created it and
+// it may end when she moves or deletes it — and BOTH dates matter, because a
+// week that is already published and full must not be rewritten by a change
+// made while planning the week after it.
+//
+//   since   first date the hour exists (inclusive)
+//   until   first date it no longer exists (exclusive); absent = still current
+//
+// A change to the recurring schedule always takes effect on a WEEK boundary.
+// Anything stamped mid-week — every `since` written before this rule existed
+// was stamped with the day the button happened to be pressed — is therefore
+// read as "from the following week". That is exactly the bug this fixes: an
+// hour added while looking at next week used to land in the middle of the
+// current week, on top of hours that were already given out.
+function effWeek(d) { return !d ? '' : (d === wkStart(d) ? d : addDays(wkStart(d), 7)); }
+
+function slotLivesInWeek(slot, weekStart) {
+  const from = effWeek(slot.since);
+  const to   = effWeek(slot.until);
+  if (from && weekStart < from) return false;
+  if (to   && weekStart >= to)  return false;
+  return true;
+}
+
+// The recurring schedule as it stands in one particular week.
+function slotsForWeek(slots, weekStart) {
+  return (slots || []).filter(s => slotLivesInWeek(s, weekStart));
+}
+
+// The entries a write should still touch: an hour that has already been ended
+// is history and must keep its old shape, or the past would change with it.
+function isLiveSlot(s) { return !s.until; }
+
 // ── Holidays ─────────────────────────────────────────────────────────────────
 // Default list only. Each teacher gets her own editable copy in her settings
 // document the first time she signs in, so this never silently expires and two
@@ -163,18 +197,18 @@ function projectLessons(slots, students, real, weeks) {
       if (!slot.sid) return;                                        // open slot
       if (!students.some(s => s.id === slot.sid)) return;           // stale sid
       const date = dateOfDi(ws, slot.di);
-      // `since` records when this assignment started. Without it, projecting
-      // backwards would place today's schedule onto past weeks — inventing
-      // lessons at hours the student was never taught, and losing the hours
-      // they actually were.
-      if (slot.since && date < slot.since) return;
+      // `since`/`until` record when this assignment started and, if it has
+      // been moved or dropped, when it stopped. Without them, projecting
+      // would place today's schedule onto every week — inventing lessons at
+      // hours the student was never taught, and losing the hours they were.
+      if (!slotLivesInWeek(slot, ws)) return;
       place(slot.sid, date, slot.t);
     });
     // Optional second weekly lesson, stored on the student.
     students.forEach(s => {
       if (!s.secondSlot) return;
       const date = dateOfDi(ws, s.secondSlot.di);
-      if (s.secondSlot.since && date < s.secondSlot.since) return;
+      if (!slotLivesInWeek(s.secondSlot, ws)) return;
       place(s.id, date, s.secondSlot.t, '_2nd');
     });
   });
@@ -232,7 +266,9 @@ function openSlotsFor(weekStart, { baseSlots = [], plan = null, lessons = [], st
   const out  = [];
 
   const candidates = [
-    ...baseSlots.map(s => ({ di: s.di, t: s.t, br: s.br || null })),
+    // Only the hours that are in force in THIS week. An hour the teacher added
+    // or moved while planning a later week does not exist here yet.
+    ...slotsForWeek(baseSlots, weekStart).map(s => ({ di: s.di, t: s.t, br: s.br || null })),
     ...(((plan && plan.extraSlots) || [])).map(s => ({ di: s.di, t: s.t, br: s.br || null })),
   ];
 
@@ -803,9 +839,13 @@ function TeacherWeekTab({ ctx }) {
     return `${String(Math.floor(e/60)).padStart(2,'0')}:${String(e%60).padStart(2,'0')}`;
   }
 
+  // The standing schedule as it applies to THIS week — not as it will look
+  // after changes the teacher has already made for a later week.
+  const weekSlots = useMemo(() => slotsForWeek(baseSlots, THIS_WK), [baseSlots, THIS_WK]);
+
   // Where an hour is, taken from the standing schedule or from this week's plan.
   function brOfSlot(di, t) {
-    const base  = baseSlots.find(x => x.di === di && x.t === t);
+    const base  = weekSlots.find(x => x.di === di && x.t === t);
     if (base) return base.br || null;
     const extra = (pubThis?.extraSlots || []).find(x => x.di === di && x.t === t);
     return extra ? (extra.br || null) : null;
@@ -817,7 +857,7 @@ function TeacherWeekTab({ ctx }) {
   function travelWarning(di, t, br) {
     if (!branches.length || !br) return '';
     const mins = x => { const [h,m] = x.split(':').map(Number); return h*60+m; };
-    const near = baseSlots
+    const near = weekSlots
       .filter(x => x.di === di && x.br && x.br !== br)
       .filter(x => Math.abs(mins(x.t) - mins(t)) < 90);
     if (!near.length) return '';
@@ -854,10 +894,20 @@ function TeacherWeekTab({ ctx }) {
       .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(),
                           br: brOfSlot(parseD(l.date).getDay(), l.time), lesson:l }));
 
-    (pubThis?.blockedSlots || []).filter(b => isValidTime(b.t)).forEach(b => {
-      const date = dateOfDi(THIS_WK, b.di);
-      put({ id:`blk_${b.di}_${b.t}`, kind:'blocked', date, time:b.t, di:b.di });
-    });
+    // A block is a mark on an hour, so it is only drawn while that hour still
+    // exists this week. Blocks left behind by an hour that has since moved or
+    // been deleted would otherwise keep sitting on the calendar for ever,
+    // often across a lesson that is really there.
+    const liveHere = new Set([
+      ...weekSlots.map(s => `${s.di}_${s.t}`),
+      ...(pubThis?.extraSlots || []).map(e => `${e.di}_${e.t}`),
+    ]);
+    (pubThis?.blockedSlots || [])
+      .filter(b => isValidTime(b.t) && liveHere.has(`${b.di}_${b.t}`))
+      .forEach(b => {
+        const date = dateOfDi(THIS_WK, b.di);
+        put({ id:`blk_${b.di}_${b.t}`, kind:'blocked', date, time:b.t, di:b.di });
+      });
 
     openSlots.forEach(s => {
       // Whose hour this was, but only when they actually dropped it. A student
@@ -875,7 +925,7 @@ function TeacherWeekTab({ ctx }) {
       .forEach(l => put({ id:l.id, kind:'lesson', date:l.date, time:l.time, di:parseD(l.date).getDay(), lesson:l }));
 
     return [...byKey.values()];
-  }, [weekLessons, openSlots, pubThis, THIS_WK, students, extraKeys]);
+  }, [weekLessons, openSlots, pubThis, THIS_WK, students, extraKeys, weekSlots]);
 
   // Sunday–Thursday always, plus any other day the week actually uses.
   const teachingDays = useMemo(() => {
@@ -1141,7 +1191,7 @@ function TeacherNextWeekTab({ ctx }) {
     const items = [];
     const used = new Set();
 
-    baseSlots.forEach(slot => {
+    slotsForWeek(baseSlots, NEXT_WK).forEach(slot => {
       let d = parseD(NEXT_WK);
       while (d.getDay() !== slot.di) d.setDate(d.getDate() + 1);
       const date = fmtD(d);
@@ -1247,7 +1297,7 @@ function TeacherNextWeekTab({ ctx }) {
     } else if (action === 'remove_extra') {
       setExtraSlots(es => es.filter(e => !(e.di===selected.di&&e.t===selected.time)));
     } else if (action === 'delete_permanent') {
-      removeBaseSlot(selected.di, selected.time);
+      removeBaseSlot(selected.di, selected.time, NEXT_WK);
     } else if (action === 'fix_orphaned') {
       ctx.fixOrphanedSlot(selected.di, selected.time);
     }
@@ -1327,7 +1377,7 @@ function TeacherNextWeekTab({ ctx }) {
 
 
       {/* ── Hidden / out-of-hours base slots warning ── */}
-      {baseSlots.filter(s => !isValidTime(s.t)).length > 0 && (
+      {slotsForWeek(baseSlots, NEXT_WK).filter(s => !isValidTime(s.t)).length > 0 && (
         <div style={{ ...S.card, background:'#fff7ed', border:'1.5px solid #fed7aa', marginBottom:10 }}>
           <div style={{ fontSize:13, fontWeight:600, color:'#9a3412', marginBottom:8 }}>
             ⚠️ שעות חסויות מחוץ לשעות הפעילות
@@ -1335,14 +1385,14 @@ function TeacherNextWeekTab({ ctx }) {
           <div style={{ fontSize:12, color:'#9a3412', marginBottom:10 }}>
             השעות הבאות אינן מוצגות בלוח (לפני 07:00 או אחרי 21:00) אך גלויות לתלמידים. מחק אותן:
           </div>
-          {baseSlots.filter(s => !isValidTime(s.t)).map(s => (
+          {slotsForWeek(baseSlots, NEXT_WK).filter(s => !isValidTime(s.t)).map(s => (
             <div key={`${s.di}_${s.t}`} style={{ ...S.row, justifyContent:'space-between', marginBottom:6, background:'#ffedd5', borderRadius:6, padding:'6px 10px' }}>
               <span style={{ fontSize:13, color:'#7c2d12' }}>
                 יום {DAY_HE[s.di]} · {s.t}
                 {s.sid ? ` · ${students.find(st=>st.id===s.sid)?.name||s.sid}` : ' · פנוי'}
               </span>
               <button style={{ ...S.btn('danger'), padding:'3px 10px', fontSize:12 }}
-                onClick={() => removeBaseSlot(s.di, s.t)}>
+                onClick={() => removeBaseSlot(s.di, s.t, NEXT_WK)}>
                 🗑 מחק
               </button>
             </div>
@@ -1397,7 +1447,7 @@ function TeacherNextWeekTab({ ctx }) {
                 </button>
                 <button style={{ ...S.btn('danger'), width:'100%', textAlign:'right' }} onClick={() => handleAction('delete_permanent')}>
                   <div style={{ fontWeight:600 }}>🗑 בטל שיעור קבוע לצמיתות</div>
-                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>מבטל את כל השיעורים העתידיים של {selected.fixedStu.name} בשעה זו</div>
+                  <div style={{ fontSize:11, fontWeight:400, opacity:0.8, marginTop:2 }}>מהשבוע הבא ואילך. השבוע הנוכחי לא ישתנה.</div>
                 </button>
               </div>
             </>
@@ -1456,7 +1506,7 @@ function TeacherNextWeekTab({ ctx }) {
           {/* Open slot (no student) */}
           {selected.isPermOpen && !selected.isOrphaned && !selected.flexStu && !selected.isBlocked && (
             <>
-              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>שעה פנויה קבועה — מופיעה כל שבוע</p>
+              <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'6px 0 14px', direction:'rtl' }}>שעה פנויה קבועה — מופיעה כל שבוע. שינוי כאן חל מהשבוע הבא ואילך.</p>
               <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }} onClick={() => { setMovingSlot({di:selected.di, t:selected.time, sid:null}); setMoveToDi(selected.di); setMoveToT(selected.time); setSelected(null); }}>✏️ שנה שעה/יום לצמיתות</button>
               <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('block_slot')}>🚫 חסום השבוע הבא בלבד</button>
               <button style={{ ...S.btn('danger'), width:'100%', marginBottom:8 }} onClick={() => handleAction('delete_permanent')}>🗑 מחק שעה לצמיתות</button>
@@ -1525,7 +1575,7 @@ function TeacherNextWeekTab({ ctx }) {
           <button style={{ ...S.btn('primary'), width:'100%', marginBottom:8 }}
             onClick={() => {
               if (!isValidTime(moveToT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
-              moveBaseSlot(movingSlot.di, movingSlot.t, moveToDi, moveToT);
+              moveBaseSlot(movingSlot.di, movingSlot.t, moveToDi, moveToT, undefined, NEXT_WK);
               setMovingSlot(null);
             }}>
             ✅ שמור שינוי
@@ -1537,7 +1587,10 @@ function TeacherNextWeekTab({ ctx }) {
       {/* ── Add permanent open slot modal ── */}
       {addingOpenSlot && (
         <Modal onClose={() => setAddingOpenSlot(false)}>
-          <h3 style={{ margin:'0 0 16px', fontSize:16, fontWeight:500, direction:'rtl' }}>הוסף שעה פנויה קבועה</h3>
+          <h3 style={{ margin:'0 0 4px', fontSize:16, fontWeight:500, direction:'rtl' }}>הוסף שעה פנויה קבועה</h3>
+          <p style={{ margin:'0 0 14px', fontSize:12, color:'var(--color-text-secondary)', direction:'rtl' }}>
+            תתווסף מהשבוע הבא ואילך — השבוע הנוכחי נשאר כפי שפורסם.
+          </p>
           <p style={{ fontSize:13, color:'var(--color-text-secondary)', margin:'0 0 14px', direction:'rtl' }}>
             השעה תופיע בלוח כל שבוע כשעה פתוחה לתלמידים ניידים.
           </p>
@@ -1560,7 +1613,7 @@ function TeacherNextWeekTab({ ctx }) {
             <button style={{ ...S.btn('success'), background:'#ccfbf1', color:'#0f766e', borderColor:'#5eead4' }}
               onClick={() => {
                 if (!isValidTime(newSlotT)) { alert('שעה לא תקינה — בחר שעה בין 07:00 ל-21:00'); return; }
-                addBaseSlot(newSlotDi, newSlotT, null, newSlotBr); setAddingOpenSlot(false);
+                addBaseSlot(newSlotDi, newSlotT, null, newSlotBr, NEXT_WK); setAddingOpenSlot(false);
               }}>
               🔓 הוסף שעה קבועה
             </button>
@@ -2176,7 +2229,7 @@ function TeacherStudentsTab({ ctx }) {
                 <strong>יום {DAY_HE[stu.di]} · {stu.t}</strong>
               </p>
               <button style={{ ...S.btn('success'), width:'100%', marginBottom:10, textAlign:'right' }}
-                onClick={() => { addBaseSlot(stu.di, stu.t, null); deleteStudent(selected); setDeletePrompt(false); setSelected(null); }}>
+                onClick={() => { addBaseSlot(stu.di, stu.t, null, null, THIS_WK); deleteStudent(selected); setDeletePrompt(false); setSelected(null); }}>
                 <div style={{ fontWeight:700 }}>🔓 הפוך למשבצת פנויה קבועה</div>
                 <div style={{ fontSize:11, fontWeight:400, marginTop:2, opacity:0.8 }}>השעה תישאר בלוח כל שבוע, פתוחה לתלמידים ניידים</div>
               </button>
@@ -2553,10 +2606,10 @@ function TeacherSettingsTab({ ctx }) {
   // What is left to tag. Counted from the real data, not remembered separately,
   // so it cannot drift out of date.
   const untaggedStats = useMemo(() => {
-    const slots = (teacher?.slots || []).filter(x => !x.br).length;
+    const slots = (teacher?.slots || []).filter(isLiveSlot).filter(x => !x.br).length;
     const stu   = (students || []).filter(x => !x.br).length;
     const perBranch = {};
-    (teacher?.slots || []).forEach(x => { if (x.br) perBranch[x.br] = (perBranch[x.br] || 0) + 1; });
+    (teacher?.slots || []).filter(isLiveSlot).forEach(x => { if (x.br) perBranch[x.br] = (perBranch[x.br] || 0) + 1; });
     return { slots, students: stu, perBranch, ready: slots === 0 && stu === 0 };
   }, [teacher, students]);
 
@@ -3709,7 +3762,10 @@ function MusicScheduler() {
 
   // ── students enriched with their slot, read off the authoritative schedule ──
   const enrichedStudents = useMemo(() => {
-    const slots = teacher?.slots || [];
+    // Only hours still in force count: an hour a student has been moved off
+    // still exists in the schedule, stamped with the week it ended, and must
+    // not be read as where they are now.
+    const slots = (teacher?.slots || []).filter(isLiveSlot);
     return students.map(s => {
       const slot = slots.find(sl => sl.sid === s.id);
       return { ...s, di: slot ? slot.di : null, t: slot ? slot.t : null,
@@ -3738,7 +3794,16 @@ function MusicScheduler() {
   const lessons = useMemo(() => {
     if (isTeacher) return projectLessons(teacher?.slots || [], enrichedStudents, realLessons, PROJ_WEEKS);
     if (me) {
-      const slots = (me.di != null && me.t) ? [{ di: me.di, t: me.t, sid: me.id }] : [];
+      // The student's own copy of the same two-sided story: the hour they are
+      // moving to, and — until it ends — the hour they still have this week.
+      const slots = [];
+      if (me.prevSlot && me.prevSlot.di != null && me.prevSlot.t) {
+        slots.push({ di: me.prevSlot.di, t: me.prevSlot.t, sid: me.id,
+                     since: me.prevSlot.since || null, until: me.prevSlot.until || null });
+      }
+      if (me.di != null && me.t) {
+        slots.push({ di: me.di, t: me.t, sid: me.id, since: me.slotSince || null });
+      }
       return projectLessons(slots, [me], realLessons, PROJ_WEEKS);
     }
     return [];
@@ -3970,11 +4035,14 @@ function MusicScheduler() {
   }
 
   // ── publishing ────────────────────────────────────────────────────────────
-  function buildBoardSlots(cancelledIds, blockedSlots, extraSlots) {
+  // `ws` matters: a board is a picture of one week, so it is built from the
+  // schedule as it stands in that week — never from a change the teacher has
+  // already made for a later one.
+  function buildBoardSlots(ws, cancelledIds, blockedSlots, extraSlots) {
     const out = [], seen = new Set();
     const isBlocked = (di, t) => blockedSlots.some(b => b.di === di && b.t === t);
 
-    (teacher?.slots || []).forEach(sl => {
+    slotsForWeek(teacher?.slots, ws).forEach(sl => {
       const key = `${sl.di}_${sl.t}`;
       if (seen.has(key)) return; seen.add(key);
       const stu     = sl.sid ? enrichedStudents.find(s => s.id === sl.sid) : null;
@@ -4030,7 +4098,7 @@ function MusicScheduler() {
         teacherPhone: teacher?.phone || '',
         branches: teacher?.branches || [],
         branchesOn: !!teacher?.branchesOn,
-        slots: buildBoardSlots(cancelledIds, blockedSlots, extraSlots),
+        slots: buildBoardSlots(ws, cancelledIds, blockedSlots, extraSlots),
         holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
         publishedAt: new Date().toISOString(),
       });
@@ -4056,43 +4124,86 @@ function MusicScheduler() {
 
   // ── recurring schedule ────────────────────────────────────────────────────
   // Each of these is one or two writes. Nothing walks the calendar.
-  async function addBaseSlot(di, t, sid = null, br = null) {
-    const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
-                   { di, t, sid: sid || null, br: br || null, since: TODAY }];
+  //
+  // Every one of them takes `from`: the first week the change applies to. The
+  // week-ahead planner passes NEXT_WK, so nothing done there can reach into a
+  // week that is already out and full — which is what used to happen, an hour
+  // added for next week appearing this week on top of hours already given out.
+  // A change from anywhere else is meant for now and passes THIS_WK.
+  //
+  // Ending an hour that is still in force this week does not delete it: it is
+  // stamped `until`, so the weeks it really ran keep their shape and it simply
+  // stops from `from` onward. Hours are only edited in place when the change
+  // starts here and now.
+  const liveSlots  = () => (teacher?.slots || []).filter(isLiveSlot);
+  const findSlot   = (di, t) => liveSlots().find(s => s.di === di && s.t === t);
+  // An hour ended long ago is no longer needed to draw or project anything.
+  const keepSlot   = (s) => !s.until || effWeek(s.until) > addDays(THIS_WK, -84);
+
+  // Retire an hour from `from` onward, or drop it outright when it never ran.
+  function retire(slots, match, from) {
+    return slots.filter(keepSlot).flatMap(s => {
+      if (!match(s)) return [s];
+      if (!isLiveSlot(s)) return [s];                       // already ended
+      if (effWeek(s.since) >= from) return [];              // never ran — drop
+      return [{ ...s, until: from }];                       // keep the history
+    });
+  }
+
+  async function addBaseSlot(di, t, sid = null, br = null, from = THIS_WK) {
+    const slots = [...retire(teacher?.slots || [], s => s.di === di && s.t === t, from),
+                   { di, t, sid: sid || null, br: br || null, since: from }];
     const batch = db.batch();
     batch.set(teacherRef(), { slots }, { merge:true });
-    if (sid) batch.update(studentRef(sid), { type:'fixed', di, t });
+    // The student's own copy of the same window, so their app draws the same
+    // weeks the teacher's does.
+    if (sid) batch.update(studentRef(sid), { type:'fixed', di, t, slotSince: from, prevSlot: null });
     await batch.commit().catch(e => console.error('addBaseSlot', e));
   }
 
-  async function removeBaseSlot(di, t) {
-    const slot  = (teacher?.slots || []).find(s => s.di === di && s.t === t);
-    const slots = (teacher?.slots || []).filter(s => !(s.di === di && s.t === t));
+  async function removeBaseSlot(di, t, from = THIS_WK) {
+    const slot  = findSlot(di, t);
+    const slots = retire(teacher?.slots || [], s => s.di === di && s.t === t, from);
     const batch = db.batch();
     batch.set(teacherRef(), { slots }, { merge:true });
     if (slot?.sid && students.some(s => s.id === slot.sid)) {
-      batch.update(studentRef(slot.sid), { type:'flexible', di:null, t:null });
+      // Their hour still runs up to `from` — the weeks before it keep it.
+      const ranBefore = effWeek(slot.since) < from;
+      batch.update(studentRef(slot.sid), {
+        type:'flexible', di:null, t:null, slotSince: null,
+        prevSlot: ranBefore ? { di, t, since: slot.since || null, until: from } : null,
+      });
     }
     await batch.commit().catch(e => console.error('removeBaseSlot', e));
   }
 
-  async function moveBaseSlot(oldDi, oldT, newDi, newT, newBr) {
-    const slot = (teacher?.slots || []).find(s => s.di === oldDi && s.t === oldT);
+  async function moveBaseSlot(oldDi, oldT, newDi, newT, newBr, from = THIS_WK) {
+    const slot = findSlot(oldDi, oldT);
     if (!slot) return;
-    const slots = (teacher?.slots || []).map(s =>
-      s.di === oldDi && s.t === oldT
-        ? { ...s, di:newDi, t:newT, br: newBr !== undefined ? newBr : (s.br || null), since: TODAY }
-        : s);
+    const br = newBr !== undefined ? newBr : (slot.br || null);
+    // The old hour ends where the new one begins, so the weeks in between —
+    // including any week already published — keep the lesson where it was.
+    const slots = [
+      ...retire(teacher?.slots || [],
+                s => (s.di === oldDi && s.t === oldT) || (s.di === newDi && s.t === newT),
+                from),
+      { ...slot, di:newDi, t:newT, br, since: from, until: undefined },
+    ].map(s => { const c = { ...s }; if (c.until === undefined) delete c.until; return c; });
     const batch = db.batch();
     batch.set(teacherRef(), { slots }, { merge:true });
     if (slot.sid && students.some(s => s.id === slot.sid)) {
-      batch.update(studentRef(slot.sid), { di:newDi, t:newT });
+      const ranBefore = effWeek(slot.since) < from;
+      batch.update(studentRef(slot.sid), {
+        di:newDi, t:newT, slotSince: from,
+        prevSlot: ranBefore ? { di:oldDi, t:oldT, since: slot.since || null, until: from } : null,
+      });
     }
     await batch.commit().catch(e => console.error('moveBaseSlot', e));
   }
 
   function fixOrphanedSlot(di, t) {
-    const slots = (teacher?.slots || []).map(s => s.di === di && s.t === t ? { ...s, sid:null } : s);
+    const slots = (teacher?.slots || []).map(s =>
+      s.di === di && s.t === t && isLiveSlot(s) ? { ...s, sid:null } : s);
     return teacherRef().set({ slots }, { merge:true }).catch(e => console.error(e));
   }
 
@@ -4102,21 +4213,21 @@ function MusicScheduler() {
 
   // Assigning an existing hour to a branch, from anywhere in the app.
   function setSlotBranch(di, t, br) {
-    const slots = (teacher?.slots || []).map(s => (s.di === di && s.t === t) ? { ...s, br: br || null } : s);
+    const slots = (teacher?.slots || []).map(s => (s.di === di && s.t === t && isLiveSlot(s)) ? { ...s, br: br || null } : s);
     return teacherRef().set({ slots }, { merge:true }).catch(e => console.error('setSlotBranch', e));
   }
 
   // Tag a whole day at once — the usual shape of a real week, where a village
   // owns a day. Thursday, which is split, is then fixed hour by hour.
   function setDayBranch(di, br) {
-    const slots = (teacher?.slots || []).map(s => s.di === di ? { ...s, br: br || null } : s);
+    const slots = (teacher?.slots || []).map(s => (s.di === di && isLiveSlot(s)) ? { ...s, br: br || null } : s);
     return teacherRef().set({ slots }, { merge:true }).catch(e => console.error('setDayBranch', e));
   }
 
   // ── students ──────────────────────────────────────────────────────────────
   async function deleteStudent(sid) {
     try {
-      const slots = (teacher?.slots || []).map(s => s.sid === sid ? { ...s, sid:null } : s);
+      const slots = (teacher?.slots || []).map(s => (s.sid === sid && isLiveSlot(s)) ? { ...s, sid:null } : s);
       await teacherRef().set({ slots }, { merge:true });
 
       // Hand back any hours they were still holding, or those slots stay
@@ -4156,7 +4267,7 @@ function MusicScheduler() {
       teacherPhone: teacher?.phone || '',
       branches: teacher?.branches || [],
       branchesOn: !!teacher?.branchesOn,
-      slots: buildBoardSlots(plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
+      slots: buildBoardSlots(ws, plan.cancelledIds || [], plan.blockedSlots || [], plan.extraSlots || []),
       holidays: teacher?.holidays || DEFAULT_HOLIDAYS,
       publishedAt: new Date().toISOString(),
     }, { merge:true }).catch(e => console.error('republishBoard', e));
@@ -4344,7 +4455,7 @@ function MusicScheduler() {
     } catch (e) { console.error('setShareContact', e); }
   }
   function assignSecondSlot(sid, slot) {
-    return studentRef(sid).update({ secondSlot: { ...slot, since: TODAY } })
+    return studentRef(sid).update({ secondSlot: { ...slot, since: THIS_WK } })
                           .catch(e => console.error(e));
   }
   function removeSecondSlot(sid) {
@@ -4352,14 +4463,14 @@ function MusicScheduler() {
   }
   function changeToFixed(sid, di, t) {
     const stu = enrichedStudents.find(s => s.id === sid);
-    return addBaseSlot(di, t, sid, stu?.br || null);
+    return addBaseSlot(di, t, sid, stu?.br || null, THIS_WK);
   }
 
   async function changeToFlexible(sid, keepSlotOpen) {
-    const slot = (teacher?.slots || []).find(s => s.sid === sid);
+    const slot = liveSlots().find(s => s.sid === sid);
     if (!slot) return studentRef(sid).update({ type:'flexible', di:null, t:null });
     if (keepSlotOpen) {
-      const slots = (teacher?.slots || []).map(s => s.sid === sid ? { ...s, sid:null } : s);
+      const slots = (teacher?.slots || []).map(s => (s.sid === sid && isLiveSlot(s)) ? { ...s, sid:null } : s);
       const batch = db.batch();
       batch.set(teacherRef(), { slots }, { merge:true });
       batch.update(studentRef(sid), { type:'flexible', di:null, t:null });
@@ -4390,12 +4501,13 @@ function MusicScheduler() {
       shareContact: share !== false, br: br || null,
       type: fixed ? 'fixed' : 'flexible', status: 'active',
       di: fixed ? di : null, t: fixed ? t : null,
+      slotSince: fixed ? THIS_WK : null, prevSlot: null,
       secondSlot: null, createdAt: new Date().toISOString(),
     });
     if (pendingId) batch.delete(db.collection('pending_students').doc(pendingId));
     if (fixed) {
-      const slots = [...(teacher?.slots || []).filter(s => !(s.di === di && s.t === t)),
-                     { di, t, sid: code, br: br || null, since: TODAY }];
+      const slots = [...retire(teacher?.slots || [], s => s.di === di && s.t === t, THIS_WK),
+                     { di, t, sid: code, br: br || null, since: THIS_WK }];
       batch.set(teacherRef(), { slots }, { merge:true });
     }
     await batch.commit();
