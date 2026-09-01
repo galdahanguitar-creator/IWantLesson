@@ -3262,10 +3262,28 @@ function StudentBoardTab({ ctx }) {
   const myBranch = branchName(board?.branches, me.br);
   const slots = useMemo(() => {
     const all = boardSlotsFor(activeWk, board, cl);
+    // My own lessons are readable only by me, and about my own week they are
+    // the truth. An hour of mine that is missing from the board — because the
+    // teacher's recurring schedule moved under a week already published —
+    // still belongs on my calendar, or a lesson that is definitely happening
+    // reads as though it had been cancelled. Only for a week that is out:
+    // before that there is nothing to correct, and nothing to show.
+    if (board) {
+      const seen = new Set(all.map(s => `${s.date}_${s.t}`));
+      lessons
+        .filter(l => l.sid === me.id && isLive(l.status) && inWk(l.date, activeWk) && isValidTime(l.time))
+        .forEach(l => {
+          const k = `${l.date}_${l.time}`;
+          if (seen.has(k)) return;
+          seen.add(k);
+          all.push({ di: parseD(l.date).getDay(), t: l.time, br: me.br || null,
+                     date: l.date, state:'taken', name: me.name, phone:'' });
+        });
+    }
     if (!branchOn) return all;
     const mineNow = new Set(lessons.filter(l => l.sid === me.id && isLive(l.status)).map(l => `${l.date}_${l.time}`));
     return all.filter(s => slotVisibleTo(s, me.br, true) || mineNow.has(`${s.date}_${s.t}`));
-  }, [activeWk, board, cl, branchOn, me.br, me.id, lessons]);
+  }, [activeWk, board, cl, branchOn, me.br, me.id, me.name, lessons]);
 
   const teachingDays = useMemo(() => {
     const diSet = new Set(slots.map(s => s.di));
@@ -4042,28 +4060,58 @@ function MusicScheduler() {
     const out = [], seen = new Set();
     const isBlocked = (di, t) => blockedSlots.some(b => b.di === di && b.t === t);
 
-    slotsForWeek(teacher?.slots, ws).forEach(sl => {
-      const key = `${sl.di}_${sl.t}`;
-      if (seen.has(key)) return; seen.add(key);
-      const stu     = sl.sid ? enrichedStudents.find(s => s.id === sl.sid) : null;
-      const removed = stu ? cancelledIds.includes(stu.id) : false;
-      let state = 'free', name = null, phone = '';
-      if (isBlocked(sl.di, sl.t))     state = 'blocked';
-      else if (stu && !removed)     {
-        state = 'taken'; name = stu.name;
-        // Only for students whose contact sharing is on. Never a code.
-        if (stu.shareContact !== false) phone = stu.phone || '';
-      }
-      out.push({ di: sl.di, t: sl.t, br: sl.br || null, state, name, phone });
+    // Who actually holds each hour that week. The board is the only thing a
+    // student can see, so it must agree with the lessons that really exist —
+    // not with the recurring schedule alone, which may have moved on since.
+    // Without this, an hour whose recurring slot was later changed disappears
+    // from the board and the student is left looking at a week with their
+    // lesson missing, as though it had been cancelled.
+    const held = new Map();
+    lessons.filter(l => inWk(l.date, ws) && isLive(l.status)).forEach(l => {
+      if (!isValidTime(l.time)) return;
+      const stu = enrichedStudents.find(s => s.id === l.sid);
+      if (!stu || cancelledIds.includes(stu.id)) return;
+      held.set(`${parseD(l.date).getDay()}_${l.time}`, stu);
     });
 
-    (extraSlots || []).forEach(sl => {
-      const key = `${sl.di}_${sl.t}`;
+    const push = (di, t, br, stu) => {
+      const key = `${di}_${t}`;
       if (seen.has(key)) return; seen.add(key);
-      out.push({ di: sl.di, t: sl.t, br: sl.br || null, state: isBlocked(sl.di, sl.t) ? 'blocked' : 'free', name: null, phone: '' });
+      const taker = held.get(key) || stu || null;
+      let state = 'free', name = null, phone = '';
+      if (isBlocked(di, t)) state = 'blocked';
+      else if (taker) {
+        state = 'taken'; name = taker.name;
+        // Only for students whose contact sharing is on. Never a code.
+        if (taker.shareContact !== false) phone = taker.phone || '';
+      }
+      out.push({ di, t, br: br || null, state, name, phone });
+    };
+
+    slotsForWeek(teacher?.slots, ws).forEach(sl => {
+      const stu     = sl.sid ? enrichedStudents.find(s => s.id === sl.sid) : null;
+      const removed = stu ? cancelledIds.includes(stu.id) : false;
+      push(sl.di, sl.t, sl.br, removed ? null : stu);
+    });
+
+    (extraSlots || []).forEach(sl => push(sl.di, sl.t, sl.br, null));
+
+    // Finally, any hour that has a lesson in it but no place in the schedule.
+    held.forEach((stu, key) => {
+      const [di, t] = [Number(key.split('_')[0]), key.split('_')[1]];
+      push(di, t, brOfHour(di, t, ws, extraSlots), stu);
     });
 
     return out;
+  }
+
+  // Where an hour is, for a board being built: the schedule of that week
+  // first, then that week's own extra hours.
+  function brOfHour(di, t, ws, extraSlots) {
+    const base  = slotsForWeek(teacher?.slots, ws).find(s => s.di === di && s.t === t);
+    if (base) return base.br || null;
+    const extra = (extraSlots || []).find(s => s.di === di && s.t === t);
+    return extra ? (extra.br || null) : null;
   }
 
   async function pubWeek(ws, cancelledIds, blockedSlots, extraSlots, note) {
@@ -4402,6 +4450,15 @@ function MusicScheduler() {
         const fixed = (await repairClaims(THIS_WK)) + (await repairClaims(NEXT_WK));
         if (fixed) console.info(`repairClaims: ${fixed} hour(s) resynced`);
       } catch (e) { console.error('repairClaims', e); }
+      // A board is a snapshot, and a snapshot can go stale — most of all when
+      // the schedule behind it changed after it went out. Rewriting the weeks
+      // that are already published, from the lessons as they now stand, is
+      // what stops a student staring at a week their lesson has vanished from.
+      // Only weeks the teacher actually published are touched.
+      try {
+        await republishBoard(THIS_WK);
+        await republishBoard(NEXT_WK);
+      } catch (e) { console.error('board resync', e); }
     })();
   }, [db, isTeacher, teacher, lessonsLoaded, enrichedStudents, lessons]);
 
