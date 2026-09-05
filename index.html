@@ -108,7 +108,19 @@ function weeksBetween(from, to, cap = 16) {
 // read as "from the following week". That is exactly the bug this fixes: an
 // hour added while looking at next week used to land in the middle of the
 // current week, on top of hours that were already given out.
-function effWeek(d) { return !d ? '' : (d === wkStart(d) ? d : addDays(wkStart(d), 7)); }
+//
+// A date that cannot be read is treated as no limit at all, never as a limit
+// that happens to exclude everything. This matters more than it looks: a
+// malformed date run through the arithmetic below comes out as the string
+// "NaN-NaN-NaN", which compares as LATER than every real date — so a single
+// bad value would quietly empty the whole calendar. An hour we cannot date is
+// shown, and the planner says so.
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+function readableDate(d) { return typeof d === 'string' && DATE_ONLY.test(d); }
+function effWeek(d) {
+  if (!readableDate(d)) return '';
+  return d === wkStart(d) ? d : addDays(wkStart(d), 7);
+}
 
 function slotLivesInWeek(slot, weekStart) {
   const from = effWeek(slot.since);
@@ -1186,6 +1198,14 @@ function TeacherNextWeekTab({ ctx }) {
     });
   }, [NEXT_WK, extraSlots]);
 
+  // Hours in the recurring schedule that do not reach the week on screen for
+  // any reason other than having been deliberately ended.
+  const strandedSlots = useMemo(() => (baseSlots || []).filter(s => {
+    if (slotLivesInWeek(s, NEXT_WK)) return false;
+    const to = effWeek(s.until);
+    return !(to && NEXT_WK >= to);
+  }), [baseSlots, NEXT_WK]);
+
   // Build calendar items: base slots + extra slots
   const calItems = useMemo(() => {
     const items = [];
@@ -1375,6 +1395,35 @@ function TeacherNextWeekTab({ ctx }) {
         לחץ על שעה קיימת לפעולות · לחץ על שטח ריק להוספת שעה חריגה
       </div>
 
+
+      {/* ── Recurring hours that are missing from this week ── */}
+      {/* An hour that was deliberately ended is expected and stays quiet. An
+          hour that claims to begin later than this week, or whose dates cannot
+          be read, is a fault — and a fault must be named, not left as a hole
+          in the calendar that the teacher has to notice for herself. */}
+      {strandedSlots.length > 0 && (
+        <div style={{ ...S.card, background:'#fff7ed', border:'1.5px solid #fed7aa', marginBottom:10 }}>
+          <div style={{ fontSize:13, fontWeight:600, color:'#9a3412', marginBottom:8, direction:'rtl' }}>
+            ⚠️ {strandedSlots.length} שעות קבועות אינן מופיעות בשבוע הזה
+          </div>
+          <div style={{ fontSize:12, color:'#9a3412', marginBottom:10, direction:'rtl' }}>
+            הן קיימות בלוח הקבוע אך התאריך שרשום עליהן מוציא אותן מהשבוע הזה. החזר אותן:
+          </div>
+          {strandedSlots.map(s => (
+            <div key={`str_${s.di}_${s.t}`} style={{ ...S.row, justifyContent:'space-between', marginBottom:6, background:'#ffedd5', borderRadius:6, padding:'6px 10px', direction:'rtl' }}>
+              <span style={{ fontSize:13, color:'#7c2d12' }}>
+                יום {DAY_HE[s.di]} · {s.t}
+                {s.sid ? ` · ${students.find(st=>st.id===s.sid)?.name || s.sid}` : ' · פנוי'}
+                <span style={{ opacity:0.7 }}>{` · מתאריך ${s.since || '—'}`}</span>
+              </span>
+              <button style={{ ...S.btn('success'), padding:'3px 10px', fontSize:12 }}
+                onClick={() => ctx.restoreBaseSlot(s.di, s.t)}>
+                ↩ החזר לשבוע
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ── Hidden / out-of-hours base slots warning ── */}
       {slotsForWeek(baseSlots, NEXT_WK).filter(s => !isValidTime(s.t)).length > 0 && (
@@ -2855,6 +2904,78 @@ function TeacherSettingsTab({ ctx }) {
             disabled={!hName.trim() || !hFrom} onClick={addHoliday}>＋ הוסף</button>
         </div>
       </div>
+
+      {/* ── the recurring schedule, exactly as it is stored ── */}
+      {/* When a calendar looks wrong there is no substitute for reading the
+          data behind it. Every recurring hour is listed here with the dates
+          that decide which weeks it belongs to, and which of the two weeks on
+          screen it actually reaches. */}
+      <RecurringScheduleReport ctx={ctx} />
+    </div>
+  );
+}
+
+function RecurringScheduleReport({ ctx }) {
+  const { teacher, students = [], THIS_WK, NEXT_WK } = ctx;
+  const [open, setOpen] = useState(false);
+  const rows = (teacher?.slots || [])
+    .slice()
+    .sort((a, b) => a.di !== b.di ? a.di - b.di : String(a.t).localeCompare(String(b.t)));
+  const missing = rows.filter(s => !slotLivesInWeek(s, THIS_WK) && !slotLivesInWeek(s, NEXT_WK)).length;
+
+  return (
+    <div style={{ ...S.card, marginTop:10 }}>
+      <div style={{ ...S.row, justifyContent:'space-between', cursor:'pointer' }} onClick={() => setOpen(o => !o)}>
+        <div style={{ fontSize:14, fontWeight:600, direction:'rtl' }}>
+          הלוח הקבוע — {rows.length} שעות
+          {missing > 0 && <span style={{ color:'#9a3412' }}>{`  ·  ${missing} לא מופיעות באף אחד מהשבועות`}</span>}
+        </div>
+        <span style={{ fontSize:13, color:'var(--color-text-secondary)' }}>{open ? '▲' : '▼'}</span>
+      </div>
+      {open && (
+        <div style={{ marginTop:10, overflowX:'auto' }}>
+          <div style={{ fontSize:11.5, color:'var(--color-text-secondary)', marginBottom:8, direction:'rtl' }}>
+            הרשימה המלאה כפי שהיא שמורה. אם שעה חסרה בלוח, כאן רואים למה.
+          </div>
+          <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12, direction:'rtl' }}>
+            <thead>
+              <tr style={{ textAlign:'right', color:'var(--color-text-secondary)' }}>
+                <th style={{ padding:'4px 6px' }}>יום</th>
+                <th style={{ padding:'4px 6px' }}>שעה</th>
+                <th style={{ padding:'4px 6px' }}>תלמיד</th>
+                <th style={{ padding:'4px 6px' }}>מתאריך</th>
+                <th style={{ padding:'4px 6px' }}>עד</th>
+                <th style={{ padding:'4px 6px' }}>השבוע</th>
+                <th style={{ padding:'4px 6px' }}>הבא</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s, i) => {
+                const here = slotLivesInWeek(s, THIS_WK);
+                const next = slotLivesInWeek(s, NEXT_WK);
+                const bad  = !here && !next;
+                return (
+                  <tr key={`${s.di}_${s.t}_${i}`} style={{ background: bad ? '#fff1f2' : 'transparent' }}>
+                    <td style={{ padding:'4px 6px' }}>{DAY_HE[s.di]}</td>
+                    <td style={{ padding:'4px 6px' }}>{s.t}</td>
+                    <td style={{ padding:'4px 6px' }}>
+                      {s.sid ? (students.find(x => x.id === s.sid)?.name || `?${s.sid}`) : 'פנוי'}
+                    </td>
+                    <td style={{ padding:'4px 6px', color: readableDate(s.since) || !s.since ? 'inherit' : '#b91c1c' }}>
+                      {s.since ? String(s.since) : '—'}
+                    </td>
+                    <td style={{ padding:'4px 6px', color: readableDate(s.until) || !s.until ? 'inherit' : '#b91c1c' }}>
+                      {s.until ? String(s.until) : '—'}
+                    </td>
+                    <td style={{ padding:'4px 6px' }}>{here ? '✓' : '—'}</td>
+                    <td style={{ padding:'4px 6px' }}>{next ? '✓' : '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -4186,7 +4307,8 @@ function MusicScheduler() {
   const liveSlots  = () => (teacher?.slots || []).filter(isLiveSlot);
   const findSlot   = (di, t) => liveSlots().find(s => s.di === di && s.t === t);
   // An hour ended long ago is no longer needed to draw or project anything.
-  const keepSlot   = (s) => !s.until || effWeek(s.until) > addDays(THIS_WK, -84);
+  // An hour whose end date cannot be read is never swept away on a guess.
+  const keepSlot   = (s) => { const to = effWeek(s.until); return !to || to > addDays(THIS_WK, -84); };
 
   // Retire an hour from `from` onward, or drop it outright when it never ran.
   function retire(slots, match, from) {
@@ -4247,6 +4369,19 @@ function MusicScheduler() {
       });
     }
     await batch.commit().catch(e => console.error('moveBaseSlot', e));
+  }
+
+  // Put a stranded hour back in force from this week on, keeping whoever is in
+  // it. The repair for an hour carrying a date that should never have been
+  // written to it.
+  function restoreBaseSlot(di, t) {
+    const slots = (teacher?.slots || []).map(s => {
+      if (!(s.di === di && s.t === t)) return s;
+      const c = { ...s, since: THIS_WK };
+      delete c.until;
+      return c;
+    });
+    return teacherRef().set({ slots }, { merge:true }).catch(e => console.error('restoreBaseSlot', e));
   }
 
   function fixOrphanedSlot(di, t) {
@@ -4636,7 +4771,7 @@ function MusicScheduler() {
     updLesson, addLesson, pubWeek, approveStudent, rejectStudent, deleteStudent,
     approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
     baseSlots: teacher?.slots || [],
-    addBaseSlot, removeBaseSlot, moveBaseSlot, clearPublishedWeek,
+    addBaseSlot, removeBaseSlot, moveBaseSlot, restoreBaseSlot, clearPublishedWeek,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
     addStudent, setShareContact, updateStudent, updateTeacher,
     branches: teacher?.branches || [], branchesOn: !!teacher?.branchesOn,
