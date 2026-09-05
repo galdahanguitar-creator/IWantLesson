@@ -2910,7 +2910,75 @@ function TeacherSettingsTab({ ctx }) {
           data behind it. Every recurring hour is listed here with the dates
           that decide which weeks it belongs to, and which of the two weeks on
           screen it actually reaches. */}
+      <ScheduleRepairCard ctx={ctx} />
       <RecurringScheduleReport ctx={ctx} />
+    </div>
+  );
+}
+
+// ── recovering a recurring schedule that was lost ────────────────────────────
+// Shown only when there is something to recover: hours the students clearly
+// have but the schedule does not. Nothing is written until the teacher has
+// read the whole list and pressed the button.
+function ScheduleRepairCard({ ctx }) {
+  const { teacher, scheduleRepair = [], applyScheduleRepair, readSlotsBackup, restoreSlotsBackup } = ctx;
+  const [busy, setBusy] = useState('');
+  const [done, setDone] = useState('');
+  const backup = readSlotsBackup ? readSlotsBackup() : null;
+  const count  = (teacher?.slots || []).filter(isLiveSlot).length;
+
+  if (!scheduleRepair.length && !backup) return null;
+
+  async function run(which) {
+    setBusy(which);
+    try {
+      if (which === 'repair') { await applyScheduleRepair(); setDone(`${scheduleRepair.length} שעות הוחזרו ללוח הקבוע`); }
+      else                    { await restoreSlotsBackup();  setDone('הלוח הקבוע שוחזר מהגיבוי המקומי'); }
+    } finally { setBusy(''); }
+  }
+
+  return (
+    <div style={{ ...S.card, marginTop:10, background:'#f0fdf4', border:'1.5px solid #86efac' }}>
+      <div style={{ fontSize:14, fontWeight:600, marginBottom:6, direction:'rtl', color:'#166534' }}>
+        שחזור הלוח הקבוע
+      </div>
+      <div style={{ fontSize:12, color:'#166534', marginBottom:12, lineHeight:1.7, direction:'rtl' }}>
+        בלוח הקבוע יש כרגע <strong>{count}</strong> שעות, ויש שעות שהתלמידים מחזיקים אך הלוח לא מכיר.
+        אפשר להחזיר אותן. הפעולה <strong>רק מוסיפה</strong> — שעה שכבר קיימת לא משתנה.
+      </div>
+
+      {scheduleRepair.length > 0 && (
+        <>
+          <div style={{ maxHeight:240, overflowY:'auto', marginBottom:10 }}>
+            {scheduleRepair.map((r, i) => (
+              <div key={i} style={{ ...S.row, justifyContent:'space-between', padding:'5px 10px', marginBottom:4,
+                                    background:'#dcfce7', borderRadius:6, fontSize:12.5, direction:'rtl' }}>
+                <span style={{ color:'#14532d' }}>
+                  יום {DAY_HE[r.slot.di]} · {r.slot.t} · {r.who}
+                </span>
+                <span style={{ color:'#166534', opacity:0.7, fontSize:11 }}>{r.from}</span>
+              </div>
+            ))}
+          </div>
+          <button style={{ ...S.btn('success'), width:'100%', marginBottom:8 }}
+            disabled={!!busy} onClick={() => run('repair')}>
+            {busy==='repair' ? 'משחזר…' : `↩ החזר ${scheduleRepair.length} שעות ללוח הקבוע`}
+          </button>
+        </>
+      )}
+
+      {backup && (
+        <button style={{ ...S.btn('info'), width:'100%' }} disabled={!!busy} onClick={() => run('backup')}>
+          {busy==='backup' ? 'משחזר…' : `↩ שחזר מגיבוי מקומי (${backup.slots.length} שעות, ${dd(String(backup.at).slice(0,10))})`}
+        </button>
+      )}
+
+      {done && <div style={{ ...S.badge('success'), marginTop:10, display:'block', textAlign:'center' }}>{done}</div>}
+
+      <div style={{ fontSize:11.5, color:'#166534', marginTop:10, lineHeight:1.7, direction:'rtl' }}>
+        אחרי השחזור עברו ללשונית <strong>שבוע</strong> ו<strong>שבוע הבא</strong>, ודאו שהלוח נכון, ולחצו
+        <strong> פרסם לתלמידים</strong> — כדי שהתלמידים יראו אותו שוב.
+      </div>
     </div>
   );
 }
@@ -3778,21 +3846,50 @@ function MusicScheduler() {
 
     subs.push(tRef.onSnapshot(async doc => {
       if (!doc.exists) {
+        // Setting up a new studio is the ONLY thing that may happen here, and
+        // it must be impossible for it to run over a studio that already
+        // exists. A listener can hand us an empty snapshot that never came
+        // from the server — a cold start reading its own local cache, a
+        // moment between credentials — and answering that with a full write
+        // would replace a real schedule with an empty one and mint a new
+        // board address, cutting every student off from the published week.
+        // So: ignore anything not confirmed by the server, and create inside
+        // a transaction that checks again and refuses if the document is
+        // there. A missed setup is retried by the next snapshot; a wrongful
+        // overwrite cannot be undone.
+        if (doc.metadata.fromCache || doc.metadata.hasPendingWrites) return;
         const email = auth?.currentUser?.email || '';
-        await tRef.set({
-          teacherId: teacherUid,
-          name: email.split('@')[0] || 'מורה',
-          studioName: 'אולפן מוסיקה',
-          slots: [], holidays: DEFAULT_HOLIDAYS,
-          // The board lives at an unguessable address rather than one derived
-          // from the teacher id, because the teacher id travels in the public
-          // registration link. Only someone handed a student code can find it.
-          boardKey: genCode(12),
-          lastSweep: null, createdAt: new Date().toISOString(),
-        });
+        try {
+          await db.runTransaction(async tx => {
+            const fresh = await tx.get(tRef);
+            if (fresh.exists) return;           // someone got here first
+            tx.set(tRef, {
+              teacherId: teacherUid,
+              name: email.split('@')[0] || 'מורה',
+              studioName: 'אולפן מוסיקה',
+              slots: [], holidays: DEFAULT_HOLIDAYS,
+              // The board lives at an unguessable address rather than one
+              // derived from the teacher id, because the teacher id travels in
+              // the public registration link. Only someone handed a student
+              // code can find it.
+              boardKey: genCode(12),
+              lastSweep: null, createdAt: new Date().toISOString(),
+            });
+          });
+        } catch (e) { console.error('studio setup', e); }
         return;
       }
       const data = doc.data();
+
+      // A local copy of the recurring schedule, kept on this device. It costs
+      // nothing, it is written only when there is something real to keep, and
+      // it is the difference between "the schedule is gone" and "one click".
+      if (Array.isArray(data.slots) && data.slots.length) {
+        try {
+          localStorage.setItem(`slotsBackup_${teacherUid}`,
+            JSON.stringify({ at: new Date().toISOString(), slots: data.slots }));
+        } catch (e) { /* private mode, full disk — never worth failing over */ }
+      }
 
       // Any slot missing `since` predates that field. Left unstamped it would
       // let the sweep project today's schedule onto past weeks. Stamp it once,
@@ -4371,6 +4468,87 @@ function MusicScheduler() {
     await batch.commit().catch(e => console.error('moveBaseSlot', e));
   }
 
+  // ── rebuilding a lost recurring schedule ──────────────────────────────────
+  // The schedule lives in one array on one document, but it is not the only
+  // record of itself: every fixed student's own card carries the day and hour
+  // they were given, and every lesson that exists names an hour that must be
+  // in the schedule. So a schedule that has been emptied can be reconstructed
+  // from what the students hold — which is exactly what this proposes, in
+  // full, before writing anything.
+  //
+  // It only speaks up when the schedule is actually damaged — a fixed student
+  // whose own card names an hour the schedule has never heard of, or a
+  // schedule with nothing in it at all. In a healthy studio a lesson sitting
+  // outside the recurring hours is an ordinary one-off, not a fault, and this
+  // must not nag about it.
+  const scheduleDamaged = useMemo(() => {
+    const live = (teacher?.slots || []).filter(isLiveSlot);
+    if (!live.length) return (students || []).some(s => s.status !== 'deleted');
+    const have = new Set(live.map(s => `${s.di}_${s.t}`));
+    return (students || []).some(s =>
+      s.status !== 'deleted' && s.type === 'fixed' && s.di != null && s.t && !have.has(`${s.di}_${s.t}`));
+  }, [teacher, students]);
+
+  const scheduleRepair = useMemo(() => {
+    if (!scheduleDamaged) return [];
+    const cur   = teacher?.slots || [];
+    const taken = new Set(cur.filter(isLiveSlot).map(s => `${s.di}_${s.t}`));
+    const out   = [];
+
+    (students || []).forEach(s => {
+      if (s.status === 'deleted') return;
+      if (s.type !== 'fixed' || s.di == null || !s.t || !isValidTime(s.t)) return;
+      const key = `${s.di}_${s.t}`;
+      if (taken.has(key)) return;
+      taken.add(key);
+      out.push({ slot: { di:s.di, t:s.t, sid:s.id, br: s.br || null, since: THIS_WK },
+                 who: s.name, from: 'כרטיס התלמיד' });
+    });
+
+    // Hours that a real lesson occupies but nothing in the schedule claims:
+    // whoever booked them did so against an hour that used to be there.
+    realLessons.forEach(l => {
+      if (!isLive(l.status) || l.date < THIS_WK || !isValidTime(l.time)) return;
+      const di  = parseD(l.date).getDay();
+      const key = `${di}_${l.time}`;
+      if (taken.has(key)) return;
+      taken.add(key);
+      const stu = (students || []).find(x => x.id === l.sid);
+      out.push({ slot: { di, t:l.time, sid:null, br: null, since: THIS_WK },
+                 who: stu ? `${stu.name} (נרשם)` : 'שעה פנויה', from: 'שיעור קיים' });
+    });
+
+    return out.sort((a, b) => a.slot.di !== b.slot.di
+      ? a.slot.di - b.slot.di
+      : String(a.slot.t).localeCompare(String(b.slot.t)));
+  }, [scheduleDamaged, teacher, students, realLessons, THIS_WK]);
+
+  // Only ever adds. An hour already in the schedule is left exactly as it is.
+  async function applyScheduleRepair() {
+    if (!scheduleRepair.length) return;
+    const slots = [...(teacher?.slots || []), ...scheduleRepair.map(r => r.slot)];
+    await teacherRef().set({ slots }, { merge:true }).catch(e => console.error('applyScheduleRepair', e));
+  }
+
+  // The copy this browser kept of the schedule, from before it was lost.
+  function readSlotsBackup() {
+    try {
+      const raw = localStorage.getItem(`slotsBackup_${teacherUid}`);
+      if (!raw) return null;
+      const b = JSON.parse(raw);
+      return Array.isArray(b?.slots) && b.slots.length ? b : null;
+    } catch (e) { return null; }
+  }
+
+  async function restoreSlotsBackup() {
+    const b = readSlotsBackup();
+    if (!b) return;
+    const cur  = teacher?.slots || [];
+    const have = new Set(cur.map(s => `${s.di}_${s.t}_${s.since || ''}`));
+    const slots = [...cur, ...b.slots.filter(s => !have.has(`${s.di}_${s.t}_${s.since || ''}`))];
+    await teacherRef().set({ slots }, { merge:true }).catch(e => console.error('restoreSlotsBackup', e));
+  }
+
   // Put a stranded hour back in force from this week on, keeping whoever is in
   // it. The repair for an hour carrying a date that should never have been
   // written to it.
@@ -4772,6 +4950,7 @@ function MusicScheduler() {
     approvedInfo, clearApprovedInfo: () => setApprovedInfo(null),
     baseSlots: teacher?.slots || [],
     addBaseSlot, removeBaseSlot, moveBaseSlot, restoreBaseSlot, clearPublishedWeek,
+    scheduleRepair, applyScheduleRepair, readSlotsBackup, restoreSlotsBackup,
     assignSecondSlot, removeSecondSlot, changeToFixed, changeToFlexible, fixOrphanedSlot,
     addStudent, setShareContact, updateStudent, updateTeacher,
     branches: teacher?.branches || [], branchesOn: !!teacher?.branchesOn,
